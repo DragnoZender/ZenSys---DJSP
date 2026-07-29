@@ -1,0 +1,25 @@
+flowchart LR
+
+%% =========================================================
+%% HIGH LEVEL DESIGN
+%% =========================================================
+
+subgraph HLD["High Level Designing"]
+
+    C1[Client/User]
+    LB1["LB + API Gateway<br/><br/>• authentication & authorization<br/>• rate limiting<br/>• routing"]
+
+    JS1["Job Svc"]
+
+    DB1(("Job DB"))
+
+    JE["Job Executor"]
+
+    C1 --> LB1
+    LB1 --> JS1
+    JS1 --> DB1
+
+    JE -- "pull jobs that need to be executed" --> DB1
+    JE -- "update status of the job" --> DB1
+
+end

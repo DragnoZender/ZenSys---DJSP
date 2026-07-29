@@ -1,0 +1,126 @@
+%% 5. Low Level Designing - Job Scheduling System
+
+graph LR
+
+    %% ──────────────────────────────────────────────
+    %% Styles
+    %% ──────────────────────────────────────────────
+    classDef client fill:#f5f5f5,stroke:#333,stroke-width:2px
+    classDef gateway fill:#e8e8e8,stroke:#333,stroke-width:2px
+    classDef service fill:#fff,stroke:#333,stroke-width:1.5px
+    classDef db fill:#f0e6d3,stroke:#8b7355,stroke-width:2px
+    classDef kafka fill:#e6f3e6,stroke:#2e7d32,stroke-width:2px
+    classDef redis fill:#ffe6e6,stroke:#c62828,stroke-width:2px
+    classDef executor fill:#e3f2fd,stroke:#1565c0,stroke-width:1.5px
+    classDef watcher fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef note fill:#fffde7,stroke:#f9a825,stroke-width:1px,font-size:10px
+
+    %% ──────────────────────────────────────────────
+    %% Nodes
+    %% ──────────────────────────────────────────────
+
+    CLIENTS[("clients / users")]:::client
+
+    LBGW["LB + API Gateway\n─────────────────\n• authentication &\n  authorization\n• rate limiting\n• caching"]:::gateway
+
+    JOB_SVC["Job Svc"]:::service
+    SEARCH_SVC["Job Search Svc"]:::service
+
+    KAFKA_INGEST["Kafka\n(ingest)"]:::kafka
+    CONSUMER_SVC["Consumer Svc"]:::service
+
+    JOB_DB[("Job DB\n(Postgres)\n─────────────────\njobs\n• id (index)\n• name\n• schedule_type\n• schedule\n  (cron/once/interval)\n• schedule_time\n  (partition)\n• payload\n• retries (3)\n• meta\n─────────────────\njob_runs\n• id\n• job_id (index)\n• status (index)\n  (queued/running/\n   success/failed)\n• start_time\n• end_time\n• modification_time\n  (index)\n• attempt_number\n• error_msg")]:::db
+
+    REDIS_POLL[("Redis\n(last_polled_time)")]:::redis
+
+    WATCHER["watcher"]:::watcher
+
+    KAFKA_EXEC["Kafka\n─────────────────\n• topic: run\n• topic: retry\n• topic: dead"]:::kafka
+
+    JOB_CONSUMER["Job Consumer Svc"]:::service
+
+    EXEC1["Executor Svc"]:::executor
+    EXEC2["Executor Svc"]:::executor
+    EXEC3["Executor Svc"]:::executor
+    EXEC4["Executor Svc"]:::executor
+    EXEC5["Executor Svc"]:::executor
+
+    REDIS_MAIN[("Redis\n(Details in notes.txt)\n─────────────────\njob: 1232,\nrequest: cancel,\nTTL")]:::redis
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Client to Services
+    %% ──────────────────────────────────────────────
+
+    CLIENTS -->|requests| LBGW
+    LBGW -->|"submit / edit the jobs"| JOB_SVC
+    LBGW --> SEARCH_SVC
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Job Ingestion Path
+    %% ──────────────────────────────────────────────
+
+    JOB_SVC -->|publish| KAFKA_INGEST
+    KAFKA_INGEST --> CONSUMER_SVC
+    CONSUMER_SVC -->|write| JOB_DB
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Immediate Job Execution
+    %% ──────────────────────────────────────────────
+
+    JOB_SVC --> KAFKA_EXEC
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Job Search / Read Path
+    %% ──────────────────────────────────────────────
+
+    SEARCH_SVC -->|read| JOB_DB
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Watcher Polling
+    %% ──────────────────────────────────────────────
+
+    WATCHER -->|"read every 20s\n• pull jobs scheduled in\n  [now, now+5min]\n  & mark as 'Queued'\n• fetch jobs where status\n  is 'running' & last\n  modified > 10s ago , (reason for this in notes.txt)"| JOB_DB
+
+    WATCHER -->|last_polled_time| REDIS_POLL
+
+    WATCHER -->|"\n\n\n\nwatcher then forwards the jobs in kafka "|KAFKA_EXEC
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Job Execution Path
+    %% ──────────────────────────────────────────────
+
+    KAFKA_EXEC --> JOB_CONSUMER
+
+    JOB_CONSUMER -->|"101 .. 1-100\n(fan out)"| EXEC1
+    JOB_CONSUMER --> EXEC2
+    JOB_CONSUMER --> EXEC3
+    JOB_CONSUMER --> EXEC4
+    JOB_CONSUMER --> EXEC5
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Executor → Kafka (ingest) heartbeat
+    %% ──────────────────────────────────────────────
+
+    EXEC1 -->|"\njob status heartbeat\n(every 10s)\n\n\n\n\n\n\n"| KAFKA_INGEST
+    EXEC2 --> KAFKA_INGEST
+    EXEC3 --> KAFKA_INGEST
+    EXEC4 --> KAFKA_INGEST
+    EXEC5 --> KAFKA_INGEST
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Cancel
+    %% ──────────────────────────────────────────────
+
+    
+    JOB_SVC -->|"cancel\n(This flow is when \n the user wants to stop \nrunnig job)"| REDIS_MAIN
+ 
+    EXEC2 -->|"\n\n\ndedicated thread connecting Exec to Redis\n same for all Execs\n\n\n"| REDIS_MAIN
+
+    %% ──────────────────────────────────────────────
+    %% Flows — Retry / Failure Handling
+    %% ──────────────────────────────────────────────
+
+    EXEC1 -. "failed job back to\nKafka for retry" .-> KAFKA_EXEC
+    JOB_CONSUMER -. "update retry count\nvia ingest Kafka" .-> KAFKA_INGEST
+
+
