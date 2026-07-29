@@ -1,0 +1,20 @@
+
+Date - 28th July 2026
+
+DLD notes
+
+(Q) What if a job gets failed to execute in the executor?
+
+=>We need to retry the job in this case. 
+ If the job gets failed to execute then the executor will push the job back in to the kafka queue, but the executor service unlike watcher service will not push the job in the 'run' topic, but in the separate topic as 'retry', Now when the Job_consumer_svc picks this job from the kafka queue, the Job_consumer_svc will need to inform the job_DB also that this is 2nd, 3rd or nth attempt to execute this job, so Job_Consumer_Svc will increment attempt_number filed of job entity by +1 respectively, and push it in the Job_DB (via Kafka(ingest) -> Consumer_Svc -> Job_DB) 
+
+This above flow will be helpful to retry a job that did not got executed in the previous attempt, but if a job still not finshied even after perticluar attempt numbers like (10 attempts), then to avoid this infinite looping issue, we have a solution for this,that is before the executor push the failed job back in the kafka queue it will compare the attempt number with the 'retires'(allowed retries by user) filed of the Job entity if it execceds then push it the 'dead' topic instead of the retry topic, then watcher will push it in the 'dead' topic of the kafka queue,  
+
+
+(Q) How the case handled : When the working Executor itself goes down.
+
+=> Watcher Service also pull the jobs, where status is 'running' & last modified > 10s ago considering the scenario when, if any of the executor executing a particular job gets down or face error, then it will not able to update the job status in the Job_DB and the defined interval of 10 secs, so the modified_time filed of that job entity will definitely be >10 secs, suggesting the executor which is supposed to execute this job is facing some issue and is not updating the job status (executor heartbeat), So watcher must again fetch that particular job and push it back in the Kafka queue in the 'run' topic 
+
+(Q) How to Cancel a Runnig Job
+
+=>

@@ -1,0 +1,32 @@
+Design a Distributed Job Scheduler (Airflow, Temporal)
+- A job scheduler is a program that automatically schedules and executes jobs at specified times or intervals.
+- It is used to automate repetitive tasks, run scheduled maintenance, or execute batch processes near real time.
+
+1. Functional Requirements
+- User can create/schedule a job (immediate/future/cron)
+- Monitor the status of job (real time)
+- Support update/cancel scheduled jobs.
+Out Of Scope: dependence in job (DAG)
+
+Non Functional Requirements
+- Scale: 10k jobs/sec
+- CAP Theorem: Availability > Consistency
+- Job should run at least once
+- Latency: The system should execute the jobs within 2s of their
+scheduled time
+
+
+2. Core Entities
+- Job
+- Scheduler
+- Executor
+
+
+3. API Designing
+ i. POST /v1/api/jobs - create/schedule a job
+ ii. GET /v1/api/jobs/{jobId} - get the job detail
+ iii. GET /v1/jobs/{jobId}/status -- Get current status
+ iv. PUT /v1/jobs/{jobId} -- Update job metadata/schedule
+ v. POST /v1/jobs/{jobId}/cancel -- Cancel a scheduled/running job
+ vi. POST /v1/jobs/{jobId}/runNow -- Run job immediately
+

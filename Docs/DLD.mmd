@@ -120,7 +120,7 @@ graph LR
     %% Flows — Retry / Failure Handling
     %% ──────────────────────────────────────────────
 
-    EXEC1 -. "failed job back to\nKafka for retry" .-> KAFKA_EXEC
-    JOB_CONSUMER -. "update retry count\nvia ingest Kafka" .-> KAFKA_INGEST
+    EXEC1 -. "1. failed job back to\nKafka for retry\n2. if attempt_number > retries, push in the 'dead' topic instead" .-> KAFKA_EXEC
+    JOB_CONSUMER -. "1. update retry count\n via ingest Kafka\n2. also push the dead status jobs in DM" .-> KAFKA_INGEST
 
 
