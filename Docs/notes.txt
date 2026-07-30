@@ -3,18 +3,54 @@ Date - 28th July 2026
 
 DLD notes
 
+(Q) Why there are two tables Job & Job_runs?
+
+The `Job` table stores the definition of the work that needs to be performed. It contains the job's configuration, such as its schedule, execution type, retry policy, and other metadata. Each job is created only once.
+
+The `Job_Runs` table stores the **actual execution instances** of a job. Every time a job is triggered—whether by its schedule, a manual execution, or a retry—a new record is created in `Job_Runs`. This allows a single job to have multiple execution instances, each with its own status, timestamps, logs, retry count, and execution result.
+
+Separating these tables provides a clear distinction between the **job definition** and its **execution history**, making it easier to track past runs, monitor failures, handle retries, and maintain a complete audit trail.
+
+
 (Q) What if a job gets failed to execute in the executor?
 
 =>We need to retry the job in this case. 
- If the job gets failed to execute then the executor will push the job back in to the kafka queue, but the executor service unlike watcher service will not push the job in the 'run' topic, but in the separate topic as 'retry', Now when the Job_consumer_svc picks this job from the kafka queue, the Job_consumer_svc will need to inform the job_DB also that this is 2nd, 3rd or nth attempt to execute this job, so Job_Consumer_Svc will increment attempt_number filed of job entity by +1 respectively, and push it in the Job_DB (via Kafka(ingest) -> Consumer_Svc -> Job_DB) 
+ If the job gets failed to execute then the executor will push the job back in to the kafka queue, but the executor service unlike watcher service will not push the job in the 'run' topic, but in the separate topic as 'retry', Now when the Job_consumer_svc picks this job from the kafka queue, the Job_consumer_svc will need to inform the Job_table also that this is 2nd, 3rd or nth attempt to execute this job, so Job_Consumer_Svc will increment attempt_number filed of job entity by +1 respectively, and push it in the Job_table (via Kafka(ingest) -> Consumer_Svc -> Job_table) 
 
 This above flow will be helpful to retry a job that did not got executed in the previous attempt, but if a job still not finshied even after perticluar attempt numbers like (10 attempts), then to avoid this infinite looping issue, we have a solution for this,that is before the executor push the failed job back in the kafka queue it will compare the attempt number with the 'retires'(allowed retries by user) filed of the Job entity if it execceds then push it the 'dead' topic instead of the retry topic, then watcher will push it in the 'dead' topic of the kafka queue,  
 
 
-(Q) How the case handled : When the working Executor itself goes down.
+(Q) How the case handled ? : When the working Executor itself goes down.
 
-=> Watcher Service also pull the jobs, where status is 'running' & last modified > 10s ago considering the scenario when, if any of the executor executing a particular job gets down or face error, then it will not able to update the job status in the Job_DB and the defined interval of 10 secs, so the modified_time filed of that job entity will definitely be >10 secs, suggesting the executor which is supposed to execute this job is facing some issue and is not updating the job status (executor heartbeat), So watcher must again fetch that particular job and push it back in the Kafka queue in the 'run' topic 
+=> Watcher Service also pull the jobs, whose corresponding job_runs entries have  status is 'running' & last modified > 10s ago considering the scenario when, if any of the executor executing a particular job gets down or face error, then it will not able to update the job status in the Job_table and the defined interval of 10 secs, so the modified_time filed of that job entity will definitely be >10 secs, suggesting the executor which is supposed to execute this job is facing some issue and is not updating the job status (executor heartbeat), So watcher must again fetch that particular job and push it back in the Kafka queue in the 'run' topic 
 
-(Q) How to Cancel a Runnig Job
+(Q) How to Cancel a Runnig Job ?
 
-=>
+=> For this situation we will have a dedicated redis cluster, a component that takes the data about job to be canceled, and store it in its cache and all the executor instances each have a deicated thread talking to this redis cache to know if the job they are currently executing (i.e job in running state) is present in the cahce, if so - termiante it, as requested to cancel by the user.
+
+But as the users will add up the jobs names in this cache with time the cahce size increases, to avoid that each entry in the redis cluster will have a TTL(time to leave) suppose of 30 sec, this also avoid the duplication of entries
+
+(Q) How to handle the immidate jobs ?
+
+=> If a user submits a job with the which is a immediate one then instead of following the normal pipeline the job_svc will directly push it into the executor kafka queue to execute.
+Also suppose we have a case where a user submitted a job at 5:00:00 PM, with the scheuled time of 5:00:10 PM (i.e they want this job to be executed 10 secs later they submit), at this moment the watcher service pulling the jobs ata interval of 20s may miss this job if it pulls the 5 min batch at exact 5:00:00 PM, and next batch at 5:00:20 PM, in this case the job will not get executed because the job did not got in the DB when the watcher list was fetching the batch, in this scenario also we will make the job_svc to push the job direclty in the executor kafka, treating it as a immidiate job
+
+So job_svc directly push the job in the executor kafka in two cases 
+1. When the job is marked immidate by the user
+2. The gap between Scheuled time of job and current time is <20s. 
+
+But since we are using kafka, which is a queue aftar all the job pushed in this queue by the job_svc as intermidate might still have other jobs before it, so we can not gurantee that this job is 100% going to be executed immideatly
+
+
+(Q) What if the wactcher service goes down?
+
+=> If such case occured then the the wacher service will not have the track of the last pull time (which was the last timeframe upto which it pulled the jobs, to avoid it we will have a seprate redis cache that will only store the the last_polled_time stamp, so when the watcher is up again it can know the time stamp from where it has to start fetching again)
+
+(Q) How to make the watcher service to query the Job_table faster ? 
+
+=> For the Job_table we will have the table partitioned based on the sceudle_time field, making it easy for the watcher service to fetch the jobs.
+
+=> The indexing for the Job_table is on the id filed, as our APIs point to a job by its ID.
+
+=> For the job_runs table, as the watcher_serive also pull the jobs, whose corresponding job_runs entries have status is 'running' & last modified > 10s ago, to make this faster to retirve we will have composite index key on fileds [status + modified-time] and other index on the 'job_id' field
+So the  [status + modified-time] index is helping to faster query the job's instance and job_id index makes it faster to fech the job for whom this instance is. 

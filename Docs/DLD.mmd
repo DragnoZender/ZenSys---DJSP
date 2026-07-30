@@ -67,7 +67,7 @@ graph LR
     %% Flows — Immediate Job Execution
     %% ──────────────────────────────────────────────
 
-    JOB_SVC --> KAFKA_EXEC
+    JOB_SVC -->|"1. immdiate job direclty in the executor kafka\n2. The gap between Scheuled time of job and current time is <20s. "| KAFKA_EXEC
 
     %% ──────────────────────────────────────────────
     %% Flows — Job Search / Read Path
@@ -83,7 +83,7 @@ graph LR
 
     WATCHER -->|last_polled_time| REDIS_POLL
 
-    WATCHER -->|"\n\n\n\nwatcher then forwards the jobs in kafka "|KAFKA_EXEC
+    WATCHER -->|"watcher then forwards the jobs in kafka "|KAFKA_EXEC
 
     %% ──────────────────────────────────────────────
     %% Flows — Job Execution Path
@@ -101,7 +101,7 @@ graph LR
     %% Flows — Executor → Kafka (ingest) heartbeat
     %% ──────────────────────────────────────────────
 
-    EXEC1 -->|"\njob status heartbeat\n(every 10s)\n\n\n\n\n\n\n"| KAFKA_INGEST
+    EXEC1 -->|"job status heartbeat\n(every 10s)"| KAFKA_INGEST
     EXEC2 --> KAFKA_INGEST
     EXEC3 --> KAFKA_INGEST
     EXEC4 --> KAFKA_INGEST
@@ -114,7 +114,7 @@ graph LR
     
     JOB_SVC -->|"cancel\n(This flow is when \n the user wants to stop \nrunnig job)"| REDIS_MAIN
  
-    EXEC2 -->|"\n\n\ndedicated thread connecting Exec to Redis\n same for all Execs\n\n\n"| REDIS_MAIN
+    EXEC2 -->|"dedicated thread connecting Exec to Redis\n same for all Execs"| REDIS_MAIN
 
     %% ──────────────────────────────────────────────
     %% Flows — Retry / Failure Handling
