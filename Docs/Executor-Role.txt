@@ -1,0 +1,5 @@
+Date - 31 july 2026
+
+Q. What jobs does the Executor service instaces actually carry out?
+
+=> 
