@@ -34,6 +34,8 @@ Job DB
         . modification_time (index)
         . attempt_number
         . error_msg
-        
+
 
 With the evolution we will not need to make changes in the schema as if we add new features we can mention them in the payload field and the executor will pase it accordingly and perform the job. So we can keep the schema as it is for now.
+
+So the design decison is finalized : For the executor service i will follow the evolutionary design pattern and will not make any changes in the schema for now.
