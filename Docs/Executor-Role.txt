@@ -2,4 +2,38 @@ Date - 31 july 2026
 
 Q. What jobs does the Executor service instaces actually carry out?
 
-=> 
+=> initially i will make the executers do the job (business logic ) themselves until my system is completely working, after that i will modify them accordingly later like instead of performing business logic create a container and hand over it the job, or make external api calls
+
+
+
+Q. Will it need changes in the databse schema with the evolution of the executor service?
+
+=> Since the DB is like this 
+
+Job DB
+
+    jobs table :
+
+        · id (index)
+        . name
+        . schedule_type
+        . schedule (cron/once/interval)
+        . schedule_time (partition)
+        · payload
+        · retries (3)
+        · meta
+
+
+    job_runs table :
+
+        · id
+        · job_id (index)
+        · status (index) (queued/running/success/failed)
+        . start_time
+        . end time
+        . modification_time (index)
+        . attempt_number
+        . error_msg
+        
+
+With the evolution we will not need to make changes in the schema as if we add new features we can mention them in the payload field and the executor will pase it accordingly and perform the job. So we can keep the schema as it is for now.

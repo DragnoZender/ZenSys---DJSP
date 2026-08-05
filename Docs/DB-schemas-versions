@@ -1,0 +1,28 @@
+Date - 5 Aug 2026
+
+version 1.0
+
+Job DB
+
+jobs table :
+
+· id (index)
+. name
+. schedule_type
+. schedule (cron/once/interval)
+. schedule_time (partition)
+· payload
+· retries (3)
+· meta
+
+
+job_runs table :
+
+· id
+· job_id (index)
+· status (index) (queued/running/success/failed)
+. start_time
+. end time
+. modification_time (index)
+. attempt_number
+. error_msg
