@@ -34,6 +34,7 @@ Job DB
         - end time
         - modification_time (index)    note:- composite index on [status + modification_time]
         - attempt_number
+        - executor_id
         - error_msg
 
 

@@ -25,6 +25,7 @@ job_runs table :
 - start_time
 - end time
 - modification_time (index)    note:- composite index on [status + modification_time]
+- executor_id
 - attempt_number
 - error_msg
 
