@@ -14,26 +14,28 @@ Job DB
 
     jobs table :
 
-        · id (index)
-        . name
-        . schedule_type
-        . schedule (cron/once/interval)
-        . schedule_time (partition)
-        · payload
-        · retries (3)
-        · meta
+        - id (index)
+        - name
+        - schedule_type
+        - status (paused/scheduled/cancel)
+        - schedule_time (partition)
+        - cron_expression
+        - payload
+        - retires 
+        - meta
 
 
     job_runs table :
 
-        · id
-        · job_id (index)
-        · status (index) (queued/running/success/failed)
-        . start_time
-        . end time
-        . modification_time (index)
-        . attempt_number
-        . error_msg
+        - id
+        - job_id (index)
+        - status (index) (queued/running/success/failed)
+        - start_time
+        - end time
+        - modification_time (index)    note:- composite index on [status + modification_time]
+        - attempt_number
+        - error_msg
+
 
 
 With the evolution we will not need to make changes in the schema as if we add new features we can mention them in the payload field and the executor will pase it accordingly and perform the job. So we can keep the schema as it is for now.

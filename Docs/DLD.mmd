@@ -29,7 +29,41 @@ graph LR
     KAFKA_INGEST["Kafka\n(ingest)"]:::kafka
     CONSUMER_SVC["Consumer Svc"]:::service
 
-    JOB_DB[("Job DB\n(Postgres)\n─────────────────\njobs\n• id (index)\n• name\n• schedule_type\n• schedule\n  (cron/once/interval)\n• schedule_time\n  (partition)\n• payload\n• retries (3)\n• meta\n─────────────────\njob_runs\n• id\n• job_id (index)\n• status (index)\n  (queued/running/\n   success/failed)\n• start_time\n• end_time\n• modification_time\n  (index)\n• attempt_number\n• error_msg")]:::db
+    JOB_DB[("Job DB
+(Postgres)
+─────────────────
+Job
+
+• id (index)
+• name
+• schedule_type
+• status
+  (paused/
+   scheduled/
+   cancel)
+• schedule_time
+  (partition)
+• cron_expression
+• payload
+• retries
+• meta
+─────────────────
+Job_run
+
+• id
+• job_id (index)
+• status (index)
+  (queued/
+   running/
+   success/
+   failed)
+• start_time
+• end_time
+• modification_time
+  (index)
+• attempt_number
+• error_msg")]
+::db
 
     REDIS_POLL[("Redis\n(last_polled_time)")]:::redis
 

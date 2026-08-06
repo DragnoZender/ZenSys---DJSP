@@ -49,8 +49,7 @@ But since we are using kafka, which is a queue aftar all the job pushed in this 
 (Q) How to make the watcher service to query the Job_table faster ? 
 
 => For the Job_table we will have the table partitioned based on the sceudle_time field, making it easy for the watcher service to fetch the jobs.
-
-=> The indexing for the Job_table is on the id filed, as our APIs point to a job by its ID.
+   & The indexing for the Job_table is on the id field, as our APIs point to a job by its ID.
 
 => For the job_runs table, as the watcher_serive also pull the jobs, whose corresponding job_runs entries have status is 'running' & last modified > 10s ago, to make this faster to retirve we will have composite index key on fileds [status + modified-time] and other index on the 'job_id' field
 So the  [status + modified-time] index is helping to faster query the job's instance and job_id index makes it faster to fech the job for whom this instance is. 
