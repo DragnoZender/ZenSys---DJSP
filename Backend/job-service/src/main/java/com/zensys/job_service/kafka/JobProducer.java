@@ -4,21 +4,25 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
-import com.zensys.job_service.event.JobCreatedEvent;
+import com.zensys.job_service.event.JobCommand;
+
+
+
 
 @Component
 public class JobProducer {
 
     @Autowired
-    private KafkaTemplate<String, JobCreatedEvent> kafkaTemplate;
+    private KafkaTemplate<String, JobCommand> kafkaTemplate;
 
-    private static final String JOB_CREATED_TOPIC = "job-created";
+    private static final String JOB_COMMANDS_TOPIC = "job-commands";
 
-    public void sendJobCreatedEvent(JobCreatedEvent event) {
+    public void sendJobCommand(JobCommand command) {
 
         kafkaTemplate.send(
-                JOB_CREATED_TOPIC,
-                event
+                JOB_COMMANDS_TOPIC,
+                command.getJobId(), //Key so that same job operations goes to same partition for consistency of operations
+                command
         );
     }
 }

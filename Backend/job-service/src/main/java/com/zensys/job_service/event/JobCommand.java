@@ -2,6 +2,7 @@ package com.zensys.job_service.event;
 
 import java.time.Instant;
 
+import com.zensys.job_service.model.JobCommandType;
 import com.zensys.job_service.model.JobStatus;
 import com.zensys.job_service.model.ScheduleType;
 
@@ -14,7 +15,11 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class JobCreatedEvent {
+public class JobCommand {
+
+    private JobCommandType type;
+
+    private String jobId;
 
     private String name;
 
@@ -31,5 +36,4 @@ public class JobCreatedEvent {
     private Integer retries;
 
     private String meta;
-
 }

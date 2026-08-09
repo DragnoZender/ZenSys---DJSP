@@ -2,6 +2,7 @@ package com.zensys.consumer_service.event;
 
 import java.time.Instant;
 
+import com.zensys.consumer_service.model.JobCommandType;
 import com.zensys.consumer_service.model.JobStatus;
 import com.zensys.consumer_service.model.ScheduleType;
 
@@ -15,7 +16,11 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class JobCreatedEvent {
+public class JobCommand {
+
+    private JobCommandType type;
+
+    private String jobId;
 
     private String name;
 
