@@ -76,11 +76,7 @@ What actually changes, and it's minor:
 So the practical guidance: use `UUID` as the Postgres column type (not text), generate UUIDv7/ULID client-side, and your `job_search_service` read path won't see any meaningful slowdown on ID lookups. The real performance lever for your search service will be whatever secondary indexes you put on filterable fields (status, job type, created_at) — not the primary key choice.
 
 
-
-
-
-
-
+Also for the initial flow we had the JobCreatedEvent class in the job_svc to map to the kafka topic job-create, but since now we will be having a unified Job-command topic we will replace this class with the new JobCommand class
 
 
 
