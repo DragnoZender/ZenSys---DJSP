@@ -79,10 +79,13 @@ So the practical guidance: use `UUID` as the Postgres column type (not text), ge
 Also for the initial flow we had the JobCreatedEvent class in the job_svc to map to the kafka topic job-create, but since now we will be having a unified Job-command topic we will replace this class with the new JobCommand class
 
 
+Date - 10th August 2026
 
+Now started implmetation of the job-search-service, which will be a read only service to search the jobs based on different filters like job_name, status, schedule_type, created_at, updated_at etc. and will be having the following APIs
 
+This service is directly connected to the Database, but only have the read-only access, to ensure that it does not modify the data in the database. the application.proerties will have the field as spring.jpa.hibernate.ddl-auto=validate which means that the service will validate the schema of the database and will not modify it.
 
-
+This is important because the job entity class in the job-search-service do not have the foreign link field to job_runs entity,as private List<JobRun> jobRuns = new ArrayList<>();, this is because the job-search-service is a read-only service and it does not need to have the foreign link to job_runs entity, as it will not be fetching the job_runs data from the database, so to avoid the unnecessary join query and to improve the performance of the search queries we will not have the foreign link to job_runs entity in the job entity class of the job-search-service.
 
 
 
