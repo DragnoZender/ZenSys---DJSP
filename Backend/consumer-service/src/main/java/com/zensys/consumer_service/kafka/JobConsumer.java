@@ -20,24 +20,6 @@ public class JobConsumer {
     )
     public void consume(JobCommand command) {
 
-        switch (command.getType()) {
-
-            case CREATE:
-                jobPersistenceService.saveJob(command);
-                break;
-
-            case UPDATE:
-                jobPersistenceService.updateJob(command);
-                break;
-
-            case DELETE:
-                jobPersistenceService.deleteJob(command);
-                break;
-
-            default:
-                throw new IllegalArgumentException(
-                        "Unknown job command: " + command.getType()
-                );
-        }
+        jobPersistenceService.processJobCommand(command);
     }
 }

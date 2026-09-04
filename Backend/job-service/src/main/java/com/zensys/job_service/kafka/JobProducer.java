@@ -21,7 +21,7 @@ public class JobProducer {
 
         kafkaTemplate.send(
                 JOB_COMMANDS_TOPIC,
-                command.getJobId(), //Key so that same job operations goes to same partition for consistency of operations
+                command.getJobId().toString(), //Key so that same job operations goes to same partition for consistency of operations
                 command
         );
     }

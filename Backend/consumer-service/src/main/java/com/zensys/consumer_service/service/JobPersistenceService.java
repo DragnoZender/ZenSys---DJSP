@@ -1,22 +1,65 @@
 package com.zensys.consumer_service.service;
 
-import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+
 import org.springframework.stereotype.Service;
 
 import com.zensys.consumer_service.event.JobCommand;
 import com.zensys.consumer_service.model.Job;
+import com.zensys.consumer_service.model.ProcessedCommand;
 import com.zensys.consumer_service.repository.JobRepository;
+import com.zensys.consumer_service.repository.ProcessedCommandRepository;
 
+import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 
 @Service
 @RequiredArgsConstructor
 public class JobPersistenceService {
 
-    @Autowired
-    private JobRepository jobRepository;
+    
+    private final JobRepository jobRepository;
+    private final ProcessedCommandRepository processedCommandRepository;
 
-    public void saveJob(JobCommand command) {
+
+    @Transactional
+    public void processJobCommand(JobCommand command) {
+
+        if (processedCommandRepository.existsById(command.getEventId())) {
+            
+            return; //Ensuring Idempotency
+        }
+
+        switch (command.getType()) {
+
+            case CREATE:
+                saveJob(command);
+                break;
+
+            case UPDATE:
+                updateJob(command);
+                break;
+
+            case DELETE:
+                deleteJob(command);
+                break;
+
+            default:
+                throw new IllegalArgumentException(
+                        "Unknown job command: " + command.getType()
+                );
+        }
+
+        processedCommandRepository.save(
+                        ProcessedCommand.builder()
+                        .eventId(command.getEventId())
+                        .processedAt(LocalDateTime.now())
+                        .build()
+        );
+    }
+        
+
+    private void saveJob(JobCommand command) {
 
         Job job = Job.builder()
                 .id(command.getJobId())
@@ -33,7 +76,7 @@ public class JobPersistenceService {
         jobRepository.save(job);
     }
 
-    public void updateJob(JobCommand command) {
+    private void updateJob(JobCommand command) {
 
         Job job = jobRepository.findById(command.getJobId())
                 .orElseThrow(() ->
@@ -54,7 +97,7 @@ public class JobPersistenceService {
         jobRepository.save(job);
     }
 
-    public void deleteJob(JobCommand command) {
+    private void deleteJob(JobCommand command) {
 
         jobRepository.deleteById(command.getJobId());
     }

@@ -18,6 +18,8 @@ import lombok.NoArgsConstructor;
 @Builder
 public class JobCommand {
 
+    private String eventId;
+
     private JobCommandType type;
 
     private String jobId;

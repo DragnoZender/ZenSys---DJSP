@@ -20,9 +20,11 @@ public class JobService {
     public String createJob(CreateJobRequest request) {
 
         String jobID = UlidCreator.getUlid().toString();
+        String eventId = UlidCreator.getUlid().toString();
 
         JobCommand command = JobCommand.builder()
         .type(JobCommandType.CREATE)
+        .eventId(eventId)
         .jobId(jobID)
         .name(request.getName())
         .scheduleType(request.getScheduleType())
@@ -41,8 +43,11 @@ public class JobService {
 
     public String updateJob(String jobId, UpdateJobRequest request) {
  
+        String eventId = UlidCreator.getUlid().toString();
+
         JobCommand command = JobCommand.builder()
             .type(JobCommandType.UPDATE)
+            .eventId(eventId)
             .jobId(jobId)
             .name(request.getName())
             .scheduleType(request.getScheduleType())
@@ -61,8 +66,11 @@ public class JobService {
     
     public String deleteJob(String jobId) {
 
+        String eventId = UlidCreator.getUlid().toString();
+
         JobCommand command = JobCommand.builder()
             .type(JobCommandType.DELETE)
+            .eventId(eventId)
             .jobId(jobId)
             .build();
 
