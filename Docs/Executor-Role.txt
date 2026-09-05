@@ -17,7 +17,7 @@ Job DB
         - id (index)
         - name
         - schedule_type
-        - status (paused/scheduled/cancel)
+        - status (paused/scheduled/running/cancel)
         - schedule_time (partition)
         - cron_expression
         - payload

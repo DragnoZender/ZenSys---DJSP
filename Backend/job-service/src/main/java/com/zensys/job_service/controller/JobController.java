@@ -26,7 +26,7 @@ public class JobController {
         return ResponseEntity.ok(jobService.createJob(request));
     }
 
-    @PutMapping("/{jobId}")
+    @PutMapping("/update/{jobId}")
     public ResponseEntity<String> updateJob(@PathVariable String jobId, @RequestBody UpdateJobRequest request) {
 
         return ResponseEntity.ok( jobService.updateJob(jobId, request));
