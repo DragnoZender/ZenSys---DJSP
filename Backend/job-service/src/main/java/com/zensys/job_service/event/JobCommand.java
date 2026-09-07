@@ -38,4 +38,8 @@ public class JobCommand {
     private Integer retries;
 
     private String meta;
+
+    private Instant nextRunTime;
+
+    private Instant lastPolledTime;
 }
