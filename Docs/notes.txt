@@ -159,3 +159,28 @@ Kafka offset commit
 
 Again, perfect.
 
+
+
+Date - 8th September 2026
+
+Major modifaction took place in the system,
+
+for implementing the distributed watcher service, we have added two new fields in the Job entity as 'next_run_time' and 'last_polled_time', and also added a composite index on these two fields along with the status field, to make the watcher service to query the jobs faster.
+
+why this two fields are needed, because the watcher service will be running in multiple instances and each instance will be polling the jobs from the Job_table, so to avoid the duplicate polling of the same job by multiple instances of watcher service, we need to have these two fields, so that each instance of watcher service can poll the jobs based on these two fields and also update the last_polled_time field after polling the jobs, so that other instances of watcher service will not poll the same jobs again.
+
+the watcher service will be polling the jobs based on the next_run_time field, which is the time when the job is scheduled to run next, and the last_polled_time field, which is the time when the job was last polled by any instance of watcher service.
+
+ SELECT * FROM jobs WHERE status IN ('scheduled', 'running') AND next_run_time <= NOW() AND last_polled_time < (NOW - 30s) LIMIT 1000
+
+why the NOW() - 30s is used in the above query, because we want to avoid the duplicate polling of the same job by multiple instances of watcher service, so we are adding a buffer time of 30 seconds, so that if any instance of watcher service is polling the jobs and it takes more than 30 seconds to process the jobs, then other instances of watcher service will not poll the same jobs again.
+what if the 30s passes ?
+this situation may occur if the watcher service is down or facing some issue and it is not able to process the jobs in time, so to avoid this situation we are adding a buffer time of 30 seconds, so that if any instance of watcher service is polling the jobs and it takes more than 30 seconds to process the jobs, then other instances of watcher service will not poll the same jobs again.
+=> If the 30s passes and the job is still not processed by any instance of watcher service, then the job will be polled again by other instances of watcher service, but this time the last_polled_time field will be updated to the current time, so that other instances of watcher service will not poll the same jobs again.
+
+Also the job status has been updated to add two new status as 'COMPLETED' and 'FAILED_PERMANENTLY', the 'COMPLETED' status is used when the job is completed successfully and the 'FAILED_PERMANENTLY' status is used when the job has failed after all the retries and it will be moved to the dead letter queue.
+
+job status life cycle is as follows:
+
+1. For the Once jobs, the status will be 'scheduled' when the job is created and it will be moved to 'running' when the job is picked by the watcher service and it will be moved to 'completed' when the job is completed successfully and it will be moved to 'failed_permanently' when the job has failed after all the retries and it will be moved to the dead letter queue.
+

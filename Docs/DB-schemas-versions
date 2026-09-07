@@ -1,31 +1,55 @@
-Date - 5 Aug 2026
+Updated DB schema documentation reflecting the current implementation:
 
-version 1.0
+---
 
-Job DB
+**Date** – 8 Sep 2026  
+**Version** – 2.0
 
-jobs table :
+### Job DB
 
-- id (index)
-- name
-- schedule_type
-- status (paused/scheduled/running/cancel)
-- schedule_time (partition)
-- cron_expression
-- payload
-- retires 
-- meta
+#### `jobs` table :
+* **`id`** *(PK, varchar(26) ULID, index)*
+* **`name`** *(varchar, unique/nullable=false)*
+* **`schedule_type`** *(enum: ONCE / CRON / INTERVAL)*
+* **`status`** *(enum: SCHEDULED, RUNNING, PAUSED, CANCELLED, COMPLETED, FAILED_PERMANENTLY)*
+* **`schedule_time`** *(timestamp, nullable — partitioned/indexed, used for ONCE or start time)*
+* **`next_run_time`** *(timestamp, indexed — next execution timestamp in UTC)* **[NEW]**
+* **`last_polled_time`** *(timestamp — tracks watcher pickup to prevent duplicate scheduling)* **[NEW]**
+* **`cron_expression`** *(varchar, nullable)*
+* **`payload`** *(jsonb)*
+* **`retries`** *(integer, default 3)*
+* **`meta`** *(jsonb — stores `intervalSeconds`, `timezone`, and custom attributes)*
 
+> **Indexes on `jobs`:**
+> * Primary Key on `id`
+> * Index on `schedule_time` (`idx_schedule_time`)
+> * Composite index on **`[next_run_time, status, last_polled_time]`** (`idx_watcher_poll`) for high-throughput watcher queries **[NEW]**
 
-job_runs table :
+---
 
-- id
-- job_id (index)
-- status (index) (queued/running/success/failed)
-- start_time
-- end time
-- modification_time (index)    note:- composite index on [status + modification_time]
-- executor_id
-- attempt_number
-- error_msg
+#### `job_runs` table :
+* **`id`** *(PK, bigint identity)*
+* **`job_id`** *(FK $\rightarrow$ jobs.id, indexed)*
+* **`status`** *(enum: PENDING, QUEUED, RUNNING, SUCCESS, FAILED, TIMEOUT, CANCELLED, EXECUTOR_DIED)*
+* **`start_time`** *(timestamp)*
+* **`end_time`** *(timestamp)*
+* **`modification_time`** *(timestamp, indexed)*
+* **`executor_id`** *(varchar)*
+* **`attempt_number`** *(integer, default 1)*
+* **`error_msg`** *(text)*
 
+> **Indexes on `job_runs`:**
+> * Primary Key on `id`
+> * Index on `job_id` (`idx_job_id`)
+> * Index on `status` (`idx_status`)
+> * Index on `modification_time` (`idx_modification_time`)
+> * Composite index on **`[status + modification_time]`** (`idx_status_modification_time`)
+
+---
+
+### Key Updates from v1.0:
+1. **Added `next_run_time` & `last_polled_time`** to `jobs` to enable distributed, duplicate-safe watcher polling.
+2. **Added composite index `idx_watcher_poll`** on `(next_run_time, status, last_polled_time)` for $O(1)$ batch polling.
+3. **Expanded `JobStatus`**: added `COMPLETED` (clean termination for `ONCE` jobs) and `FAILED_PERMANENTLY` (when retries hit DLQ).
+4. **Made `schedule_time` nullable**: allows `CRON` jobs without arbitrary dummy timestamps.
+5. **Expanded `JobRunStatus`**: added `PENDING`, `TIMEOUT`, `CANCELLED`, and `EXECUTOR_DIED` per the design doc.

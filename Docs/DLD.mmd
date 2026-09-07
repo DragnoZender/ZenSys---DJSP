@@ -41,9 +41,13 @@ Job
   (paused/
    scheduled/
    running/
-   cancel)
+   cancel/
+   completed/
+   failed_permanently)
 • schedule_time
   (partition)
+• next_run_time (index)
+• last_polled_time (index) 
 • cron_expression
 • payload
 • retries
@@ -57,7 +61,10 @@ Job_run
   (queued/
    running/
    success/
-   failed)
+   failed/
+   timeout/
+   cancelled/
+   executor_died)
 • start_time
 • end_time
 • modification_time
