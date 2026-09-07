@@ -1,0 +1,478 @@
+
+1. Functional Requirements
+
+Feature 1: Ability to schedule a job at specified times (immediate/future/cron expression)
+Feature 2: Monitor the status of jobs in real-time (pending, running, success, failed, cancelled)
+Feature 3: Support update/cancel scheduled jobs before execution
+Feature 4: Support job dependencies - DAG (Directed Acyclic Graph) execution order
+Feature 5: Retry mechanism with configurable retry count and backoff strategy
+Feature 6: Dead letter queue for permanently failed jobs
+Feature 7: Job prioritization and resource allocation (CPU, memory limits per job)
+
+
+2. Non-Functional Requirements
+
+Scale & Performance
+
+Job Volume — Millions of jobs per day, thousands of jobs per second
+Executors — 100s of executor instances for parallel job execution
+Latency — Jobs should execute within 2s of scheduled time (±2s tolerance)
+
+Reliability & Consistency
+
+CAP Theorem — Availability >> Consistency (Job should run at least once, eventual consistency acceptable)
+Execution Guarantee — At-least-once execution (jobs may retry on failure, idempotency required)
+Durability — Job state persisted, no jobs lost even on system failure
+
+Scheduling Requirements
+
+Cron Support — Standard cron expressions (0 0 * * * for daily at midnight)
+Time Zones — Support scheduling in different time zones
+Backfill — Ability to run missed jobs (if scheduler was down)
+
+
+3. Core Entities
+
+Entity 1: Job - Task definition with job_id, name, schedule (cron/timestamp), payload, dependencies
+Entity 2: Scheduler - Component that schedules jobs based on time/cron expressions
+Entity 3: Executor - Worker that executes jobs, pulls from queue and runs job logic
+Entity 4: JobRun - Execution instance with run_id, job_id, status, start_time, end_time, logs
+Entity 5: DAG (Directed Acyclic Graph) - Workflow with multiple dependent jobs
+
+
+4. API Designing
+
+Job Management
+
+POST /v1/api/jobs — Create/schedule a job {name, schedule: 'cron/timestamp', payload, retry: 3, dependencies: []}
+GET /v1/api/jobs/{jobId} — Get job details (schedule, status, last run time)
+GET /v1/api/jobs/{jobId}/status — Get current status of job execution
+PUT /v1/api/jobs/{jobId} — Update job schedule or payload
+POST /v1/api/jobs/{jobId}/cancel — Cancel a scheduled/running job
+POST /v1/api/jobs/{jobId}/runnow — Run job immediately (trigger ad-hoc execution)
+
+Monitoring
+
+GET /v1/api/jobs/runs — List all job runs with filters (status, date range)
+GET /v1/api/jobs/{jobId}/runs — Get execution history for specific job
+GET /v1/api/jobs/stats — Get statistics (total jobs, success rate, avg execution time)
+
+
+5. High Level Design
+
+1. Clients/Users → LB + API Gateway: Authentication, authorization, rate limiting, routing
+2. Job Service → Job DB (PostgreSQL): Stores job definitions (schedule, payload, dependencies, retry config)
+3. Job Executor → Job DB: Pulls jobs that need to be executed, updates status
+4. Scheduler (Watcher) → Redis + Kafka: Polls jobs scheduled for execution, publishes to Kafka topics
+5. Kafka Topics: run (immediate execution), retry (failed jobs with retry), dead (permanently failed)
+6. Job Consumer Service → Executor Pool: Consumes from Kafka, dispatches to available executors
+7. Executor Services (100s instances): Execute job logic, update status in DB, publish results to Kafka
+8. Redis: Stores last-polled-time for scheduler, distributed locks for executors
+
+
+6. Deep Dive Design (Low Level)
+
+Step 1: Job Creation & Scheduling
+1. User sends: POST /v1/api/jobs with {name: 'ETL Pipeline', schedule_type: 'cron', schedule_value: '0 0 * * *', payload: {db_connection}, retry_count: 3, timeout: 3600}
+2. Job Service validates: Cron expression valid, schedule_time in future if one-time, dependencies don't create cycles (DAG validation)
+3. Service creates: Job record in PostgreSQL {job_id: UUID, name, schedule_type: 'cron', schedule_value, status: 'scheduled', next_run_time: '2025-01-21T00:00:00Z', created_at}
+4. Service calculates: next_run_time using cron parser library (croniter in Python), stores in indexed column for efficient polling
+5. Service returns: {job_id, status: 'scheduled', next_run_time}
+
+Step 2: Scheduler (Watcher) Polling
+1. Watcher service runs: Infinite loop with 20-second interval (configurable)
+2. Service queries: SELECT * FROM jobs WHERE status IN ('scheduled', 'running') AND next_run_time <= NOW() AND last_polled_time < (NOW - 30s) LIMIT 1000
+3. Service fetches: 1000 jobs ready for execution, updates last_polled_time = NOW() to prevent duplicate processing by other watchers
+4. For each job: Calculate if should run based on schedule_type - for cron, check if current time matches expression, for one-time check if next_run_time passed
+5. Service publishes: Job to Kafka topic 'run' with {job_id, run_id: UUID, payload, timestamp, attempt: 1}
+
+Step 3: Job Consumption & Execution
+1. Job Consumer Service: Consumes from Kafka topics 'run', 'retry' with consumer group 'job-consumers', partitioned by job_id for ordering
+2. Consumer receives: Job message {job_id, run_id, payload, attempt: 1}
+3. Consumer creates: JobRun record in DB {run_id, job_id, status: 'pending', scheduled_at, created_at}
+4. Consumer checks: Available executor capacity from Redis executors:available (tracks active jobs per executor), implements load balancing
+5. Consumer dispatches: Job to Executor Service via internal API POST /executor/run with {run_id, job_id, payload}, updates status to 'running'
+6. Executor updates: DB with status='running', start_time=NOW(), publishes heartbeat every 10s to Redis executor:{executor_id}:heartbeat
+
+Step 4: Job Execution by Executor
+1. Executor receives: Job details {run_id, job_id, payload}
+2. Executor fetches: Full job definition from Job DB (or Redis cache with TTL=5 min) to get retry_count, timeout, dependencies
+3. Executor runs: Job logic in isolated process/container (Docker container or separate thread with resource limits)
+4. Job execution: Runs user-defined code (Python script, shell command, HTTP request to external service), streams logs to centralized logging (CloudWatch, ELK)
+5. Timeout handling: If execution exceeds timeout (3600s), kill process, mark as 'timeout' status
+6. Executor updates: DB with status='success' or 'failed', end_time, error_msg (if failed), execution_time_ms
+
+Step 5: Retry Mechanism
+1. On job failure: Executor checks job.retry_count > current_attempt (e.g., retry_count=3, attempt=1)
+2. Executor publishes: To Kafka 'retry' topic with {job_id, run_id, payload, attempt: 2, retry_delay: 60s (exponential backoff)}
+3. Delay calculation: retry_delay = base_delay * (2 ^ attempt) + jitter, e.g., 60s, 120s, 240s for attempts 1, 2, 3
+4. Retry Consumer: Consumes from 'retry' topic, sleeps for retry_delay duration, then republishes to 'run' topic for re-execution
+5. Final failure: If attempt > retry_count (e.g., attempt=4, retry_count=3), publish to 'dead' topic, update job status='failed_permanently', send alert
+
+Step 6: DAG Dependency Resolution
+1. Job definition: Job B depends on Job A completion - stored as jobs.dependencies = [job_a_id]
+2. Scheduler checks: Before scheduling Job B, query JobRuns table WHERE job_id IN (dependencies) AND status='success' AND run_date = TODAY
+3. Conditional execution: If all dependencies met, publish Job B to Kafka 'run', else skip and wait for next watcher cycle
+4. Parallel execution: Jobs C and D both depend on B - once B succeeds, both C and D published simultaneously for parallel execution
+5. Cycle detection: On job creation, run DFS (Depth-First Search) on dependency graph, reject job if cycle detected (e.g., A→B→C→A)
+
+Step 7: Job Cancellation
+1. User sends: POST /v1/api/jobs/{job_id}/cancel
+2. Job Service checks: Current status - if 'scheduled' (not running), update status='cancelled' in DB, remove from next scheduling cycle
+3. If status='running': Publish cancellation event to Kafka 'cancel' topic with {job_id, run_id}
+4. Executor receives: Cancellation event via subscription to 'cancel' topic, sends SIGTERM to job process
+5. Graceful shutdown: Process has 30s to cleanup (close DB connections, save state), then SIGKILL if not exited
+6. Executor updates: DB with status='cancelled', end_time=NOW(), publishes completion event
+
+Step 8: Monitoring & Health Checks
+Watcher service monitors: Executor heartbeats in Redis, if executor:{id}:heartbeat not updated in 60s, mark executor as 'unhealthy'
+Service identifies: Jobs running on unhealthy executor (query JobRuns WHERE executor_id={id} AND status='running')
+Service reschedules: Those jobs by publishing to Kafka 'run' topic with note 'rescheduled_from_dead_executor', updates old run status='executor_died'
+Dashboard metrics: Total jobs scheduled, running, success, failed (last 24h), avg execution time, success rate %, executors online/offline
+Alerts: Triggered on: job failure rate >10%, executor capacity >80%, dead letter queue size >100 jobs
+
+Step 9: Distributed Locking (Prevent Duplicate Execution)
+1. Problem: Multiple watcher instances poll jobs, could schedule same job twice
+2. Solution: Redis distributed lock using SETNX - before scheduling job, acquire lock: SET lock:job:{job_id}:schedule {watcher_id} NX EX 60
+3. Lock acquired: Watcher schedules job (publishes to Kafka), releases lock DELETE lock:job:{job_id}:schedule
+4. Lock failed: Another watcher already processing this job, skip to next job in query result
+5. Auto-expiry: Lock expires in 60s if watcher crashes, prevents deadlock, next watcher cycle picks up job
+
+Step 10: Handling Missed Jobs (Backfill)
+1. Scenario: Scheduler down for 2 hours, 100 hourly jobs missed
+2. Backfill detection: On watcher restart, query jobs WHERE next_run_time < (NOW - 2 * schedule_interval) AND status='scheduled'
+3. Backfill strategy: For each missed job, create JobRun with scheduled_at = missed_time, status='backfill', publish to Kafka
+4. Throttling: Publish backfill jobs at controlled rate (100 jobs/sec) to prevent overwhelming executors
+5. User notification: Send alert 'Scheduler was down, running 100 missed jobs' for transparency
+
+
+7. Client-Side Components (UI/CLI)
+
+Component 1: Job Definition UI - Form to create jobs with cron expression builder, payload editor
+Component 2: DAG Visualizer - Graph view showing job dependencies with nodes and edges
+Component 3: Job Monitor Dashboard - Real-time status board with job counts (running, success, failed)
+Component 4: Execution History - Timeline view of past job runs with logs and error details
+Component 5: Cron Expression Helper - Interactive cron builder with natural language (every day at 2 AM)
+Component 6: Alert Configuration - UI to set alerts on job failures, SLA breaches
+Component 7: CLI Tool - Command-line interface for power users (airflow trigger dag_id, airflow list_jobs)
+
+
+8. Database Schema Details
+
+Jobs (PostgreSQL - master job definitions)
+
+job_id — uuid PRIMARY KEY
+name — varchar(255) UNIQUE
+schedule_type — enum (cron, one_time, interval)
+schedule_value — varchar(255) (cron expression or ISO timestamp)
+next_run_time — timestamp INDEXED (for efficient polling)
+last_polled_time — timestamp (prevents duplicate scheduling)
+status — enum (scheduled, running, paused, cancelled)
+payload — jsonb (job-specific parameters)
+dependencies — uuid[] (array of job_ids this job depends on)
+retry_count — integer DEFAULT 3
+timeout — integer (seconds, e.g., 3600)
+priority — integer (1-10, higher = more important)
+owner_id — uuid FK → Users
+created_at — timestamp
+updated_at — timestamp
+
+
+JobRuns (PostgreSQL - execution history)
+
+run_id — uuid PRIMARY KEY
+job_id — uuid FK → Jobs, INDEXED
+status — enum (pending, running, success, failed, timeout, cancelled, executor_died)
+scheduled_at — timestamp (when job was supposed to run)
+start_time — timestamp (actual start time)
+end_time — timestamp (completion time)
+execution_time_ms — bigint (duration in milliseconds)
+executor_id — varchar(100) (which executor ran this job)
+attempt — integer (1, 2, 3 for retries)
+error_msg — text (error details if failed)
+logs_url — varchar(500) (S3 path or CloudWatch link)
+created_at — timestamp INDEXED (for history queries)
+
+
+Redis - Distributed State
+
+lock:job:{job_id}:schedule — STRING {watcher_id} with NX EX 60 (distributed lock)
+executor:{executor_id}:heartbeat — STRING {timestamp} updated every 10s (health check)
+executors:available — HASH {executor_id: active_job_count} (load balancing)
+job:{job_id}:cache — HASH (cached job definition, TTL: 5 min)
+last_poll_time — STRING timestamp of last successful watcher poll
+
+
+Kafka Topics
+run — Jobs ready for immediate execution (10 partitions by job_id)
+retry — Failed jobs with remaining retry attempts (5 partitions)
+dead — Permanently failed jobs after all retries (1 partition, low volume)
+cancel — Cancellation requests for running jobs (3 partitions)
+completed — Job completion events for downstream systems (10 partitions)
+
+
+9. Alternative Scheduling Solutions
+
+Approach 1: Event-Driven (Amazon EventBridge)
+
+Concept: Jobs triggered by events instead of time-based polling
+Implementation: EventBridge rules match cron expressions, trigger Lambda functions or SQS queues
+Pros: Serverless, auto-scaling, no polling overhead, pay-per-execution
+Cons: Vendor lock-in (AWS), limited to 300 targets per rule, cold start latency
+Use case: Simple scheduled tasks, cloud-native architectures
+
+Approach 2: Managed Service (AWS Step Functions, Temporal)
+
+Concept: Workflow orchestration as a service with built-in retry, state management
+Implementation: Define workflows as JSON (Step Functions) or code (Temporal), service handles execution
+Pros: No infrastructure management, built-in monitoring, durable execution (survives crashes)
+Cons: Cost (per state transition), learning curve, less control over execution
+Use case: Complex workflows with multiple steps, enterprise applications
+
+Approach 3: Custom with Delay Queue (RabbitMQ, SQS)
+
+Concept: Use message queue's delay feature to schedule jobs
+Implementation: Publish message with delay = (scheduled_time - now), consumer picks up when delay expires
+Pros: Simple, leverages existing message queue, supports priorities
+Cons: Limited to max delay (SQS: 15 min, need rescheduling), no cron support, poor for recurring jobs
+Use case: One-time delayed jobs, reminder systems
+
+
+10. Scaling & Optimization
+
+Technique 1: Horizontal Executor Scaling - Add more executor instances, Kafka partitioning ensures parallel processing
+Technique 2: Database Indexing - Index on (next_run_time, status, last_polled_time) for fast watcher queries
+Technique 3: Job Caching - Cache job definitions in Redis (TTL: 5 min), reduces DB reads by 90%
+Technique 4: Kafka Partitioning - Partition 'run' topic by job_id ensures ordering, prevents race conditions
+Technique 5: Read Replicas - Route job history queries to PostgreSQL read replicas, writes to primary only
+Technique 6: Watcher Sharding - Multiple watcher instances with different polling intervals (watcher-1: every 20s, watcher-2: every 60s for low-priority jobs)
+Technique 7: Priority Queues - Separate Kafka topics for high/low priority jobs, high-priority consumers have more instances
+Technique 8: Batch Processing - Watcher fetches 1000 jobs per query instead of 1, publishes in batch to Kafka
+Technique 9: Circuit Breaker - If external job dependency (API) fails >5 times, pause job for 10 min, prevent spam
+Technique 10: Execution Pooling - Executors maintain pool of worker threads/processes, reuse for multiple jobs (avoid cold start)
+Technique 11: Log Aggregation - Stream job logs to S3/CloudWatch async, don't block job execution on log writes
+Technique 12: Dead Letter Queue Monitoring - Alert when dead topic has >100 messages, indicates systemic issue
+
+
+11. Common Interview Questions
+
+Q
+How do you prevent the same job from being scheduled twice by multiple watcher instances?
+A
+Distributed locking with Redis:
+
+(1) Lock acquisition - before scheduling job, watcher attempts SET lock:job:{job_id}:schedule {watcher_id} NX EX 60 (set if not exists, 60s expiry),
+
+(2) Lock success - if returns 1, watcher proceeds to publish job to Kafka, updates last_polled_time in DB, releases lock,
+
+(3) Lock failure - if returns 0, another watcher already processing this job, skip to next job,
+
+(4) Database-level protection - UPDATE jobs SET last_polled_time = NOW() WHERE job_id = {id} AND last_polled_time < (NOW - 30s), only updates if not recently polled,
+
+(5) Auto-expiry - lock expires in 60s if watcher crashes, prevents deadlock. Alternative: Use Kafka as single-source scheduling - only 1 watcher publishes to Kafka (leader election via Zookeeper), consumers handle rest. Trade-off: Redis lock is faster, simpler vs Kafka leader election is more robust for multi-datacenter. Example: Job J1 next_run_time=10:00 AM → Watcher-1 and Watcher-2 poll at same time → Watcher-1 acquires lock → publishes J1 to Kafka → releases lock → Watcher-2's lock fails → skips J1.
+
+Q
+How do you handle jobs that are scheduled while the scheduler is down?
+A
+Backfill mechanism:
+
+(1) Detection - on watcher restart, query jobs WHERE next_run_time < NOW() AND status IN ('scheduled', 'running'), identifies missed jobs,
+
+(2) Categorization - jobs with next_run_time in last 2 hours = recent misses (high priority), >2 hours = stale (may skip or backfill based on policy),
+
+(3) Backfill execution - for each missed job, create JobRun with scheduled_at = original_next_run_time, status='backfill', publish to Kafka 'run' topic,
+
+(4) Rate limiting - publish backfill jobs at 100 jobs/sec to prevent overwhelming executors (if 1000 missed jobs, takes 10s to queue all),
+
+(5) SLA check - if job has SLA (must run within 1 hour of schedule), skip if SLA breached, mark as 'missed_sla', alert user,
+
+(6) Recurring jobs - for cron jobs, calculate all missed runs: if daily job down for 3 days, create 3 JobRuns for Day 1, 2, 3, or skip to most recent (configurable). Example: Scheduler down from 10:00-12:00, Job A scheduled hourly (10:00, 11:00, 12:00) → on restart at 12:05, detect 2 missed runs → backfill creates runs for 10:00, 11:00 → publish both to Kafka → executors process → update next_run_time to 13:00.
+
+Q
+How do you implement retry mechanism with exponential backoff?
+A
+Multi-stage retry pipeline:
+
+(1) Initial failure - executor catches exception, checks job.retry_count (e.g., 3) vs current attempt
+
+(1), if retries remaining, proceed,
+
+(2) Delay calculation - retry_delay = base_delay * (2 ^ (attempt - 1)) + random(0, base_delay/2), example: attempt 1 → 60s, attempt 2 → 120s + jitter (0-30s), attempt 3 → 240s + jitter,
+
+(3) Publish to retry topic - executor publishes to Kafka 'retry' with {job_id, run_id, payload, attempt: 2, scheduled_retry_at: NOW() + retry_delay},
+
+(4) Retry consumer - dedicated consumer group reads 'retry' topic, for each message: calculate wait_time = scheduled_retry_at - NOW(), if wait_time > 0: sleep(wait_time), then republish to 'run' topic,
+
+(5) Final failure - if attempt > retry_count, publish to 'dead' topic, update DB status='failed_permanently', send alert via SNS/email,
+
+(6) Jitter rationale - prevents thundering herd (100 jobs fail at same time, all retry at exact same moment without jitter). Alternative: Use Kafka delayed message feature (Kafka 3.0+) or SQS delay queue for retry scheduling. Example: Job fails at 10:00 → retry_count=3 → attempt 1 fails → retry at 10:01 (60s) → attempt 2 fails → retry at 10:03 (120s) → attempt 3 fails → retry at 10:07 (240s) → attempt 4 (exceeds retry_count) → dead letter queue.
+
+Q
+How do you handle job dependencies in a DAG (Directed Acyclic Graph)?
+A
+Dependency resolution with topological ordering:
+
+(1) Storage - Job table has dependencies column: job_b.dependencies = [job_a_id, job_c_id] means B depends on A and C,
+
+(2) Cycle detection - on job creation/update, run DFS (Depth-First Search) starting from new job, if visit same node twice, cycle exists, reject with 'Circular dependency detected: A→B→C→A',
+
+(3) Scheduling check - watcher before scheduling Job B, queries: SELECT COUNT(*) FROM job_runs WHERE job_id IN (job_a_id, job_c_id) AND status='success' AND DATE(scheduled_at) = TODAY, if count != 2 (missing dependencies), skip Job B this cycle,
+
+(4) Trigger on completion - when Job A completes successfully, publish 'job.completed' event to Kafka with {job_id: A, run_date},
+
+(5) Dependency watcher - separate service consumes 'job.completed', queries jobs WHERE dependencies CONTAINS job_a_id, checks if all dependencies now met, if yes, publishes dependent jobs to 'run' topic,
+
+(6) Parallel execution - jobs at same level (C and D both depend only on B) published simultaneously for parallel execution. Alternative: Airflow's approach - precompute DAG at deployment, store as graph in memory, traverse on each run. Example: DAG: A → B → C, D (B depends on A, C and D depend on B) → A runs at 10:00, succeeds → B scheduled for 10:05, succeeds → C and D both scheduled for 10:10 in parallel.
+
+Q
+What happens if an executor crashes while running a job?
+A
+Executor failure detection and recovery:
+
+(1) Heartbeat monitoring - executors publish heartbeat to Redis executor:{id}:heartbeat every 10s with timestamp,
+
+(2) Watcher health check - separate health check service polls Redis every 30s, checks if any executor's heartbeat > 60s old (3 missed heartbeats), marks as 'unhealthy',
+
+(3) Job identification - query JobRuns WHERE executor_id = {unhealthy_id} AND status='running', finds orphaned jobs,
+
+(4) Rescheduling - for each orphaned job: update status='executor_died', create new JobRun with attempt = old_attempt + 1 (counts as retry), publish to Kafka 'run' topic,
+
+(5) Cleanup - remove executor:{id} from Redis executors:available pool, alert ops team,
+
+(6) Idempotency requirement - jobs must be idempotent (safe to run multiple times) because crashed job may have partially completed before executor died. Example: Executor E1 running Job J1 (writing to database) → E1 crashes at 50% completion → heartbeat stops → health check detects after 60s → Job J1 rescheduled to Executor E2 → E2 re-runs full job → job's code must handle 'partial completion' scenario (check if data already written, skip or upsert). Prevention: Use distributed locks for critical sections (job locks specific resource before modifying).
+
+Q
+How do you implement priority-based job scheduling?
+A
+Multi-tier priority queue system:
+
+(1) Priority definition - jobs have priority field (1-10, 10=highest), stored in Job table,
+
+(2) Topic separation - Kafka topics: high_priority_run (priority 8-10), medium_priority_run (5-7), low_priority_run (1-4),
+
+(3) Watcher routing - when scheduling job, publish to appropriate topic based on job.priority,
+
+(4) Consumer allocation - high priority topic has 50 consumer instances, medium has 30, low has 20 (2.5x more resources for high priority),
+
+(5) Within-topic ordering - jobs in same priority topic processed FIFO (First In First Out) using Kafka partitioning,
+
+(6) Starvation prevention - if low priority jobs waiting >1 hour, temporarily boost to medium priority (aging algorithm). Alternative: Single topic with priority header, consumers poll high-priority partitions more frequently. Example: Job A (priority 9) and Job B (priority 3) scheduled at same time → A published to high_priority_run, B to low_priority_run → high topic has 50 consumers, low has 20 → A assigned to executor in <1s, B waits 5s for executor. Trade-off: More topics = more complexity but better isolation, single topic = simpler but consumers need priority-aware logic.
+
+Q
+How do you handle time zone conversions for scheduled jobs?
+A
+Server-side time zone normalization:
+
+(1) Storage - all timestamps in DB stored as UTC (jobs.next_run_time = '2025-01-21T00:00:00Z'),
+
+(2) User input - job creation accepts schedule with time zone: {schedule: '0 0 * * *', timezone: 'America/New_York'},
+
+(3) Conversion on save - backend converts to UTC using timezone library (pytz in Python): cron '0 0 * * *' in EST (UTC-5) → UTC '0 5 * * *', stores UTC version,
+
+(4) Display - when user views job, convert back to their timezone for display: '2025-01-21T00:00:00Z' UTC → '2025-01-20T19:00:00' EST,
+
+(5) DST handling - recalculate next_run_time when daylight saving time changes (March/November), e.g., job '9 AM EST' shifts 1 hour in UTC,
+
+(6) Watcher logic - always works in UTC, no timezone awareness needed for scheduling. Complexity: Recurring jobs across DST boundary - job scheduled for '2 AM EST daily' on DST start day (2 AM doesn't exist), skip to 3 AM or run at 1 AM (configurable). Example: User in India (IST, UTC+5:30) schedules job for daily at midnight local time → backend stores as UTC 18:30 previous day → watcher at 18:30 UTC triggers job → user sees '00:00 IST' in UI. Alternative: Store timezone with each job, watcher converts on-the-fly (more flexible but complex).
+
+Q
+How do you implement job cancellation for already running jobs?
+A
+Graceful cancellation protocol:
+
+(1) User request - POST /jobs/{job_id}/cancel, service checks status, if 'running', publish to Kafka 'cancel' topic with {job_id, run_id},
+
+(2) Executor subscription - all executors subscribe to 'cancel' topic with consumer group per executor (ensures all get message),
+
+(3) Executor matching - executor checks if run_id matches currently running job, if yes, initiates cancellation,
+
+(4) Signal sending - executor sends SIGTERM (signal 15) to job process, allows graceful shutdown (close connections, save state),
+
+(5) Timeout - if process doesn't exit in 30s, send SIGKILL (signal 9) to force terminate,
+
+(6) Status update - executor updates DB status='cancelled', end_time=NOW(), publishes 'job.cancelled' event,
+
+(7) Cleanup - release any distributed locks held by job, rollback transactions if applicable. Edge case: Job already completed before cancellation received → executor ignores cancel message, DB status remains 'success'. Alternative: Use shared memory flag (Redis cancel:{run_id} = true), job periodically checks flag and exits if set (requires job code cooperation). Example: Long-running ETL job (2 hours) → user cancels after 30 min → cancel event published → executor sends SIGTERM → job's cleanup handler runs (commits partial data) → exits gracefully → status='cancelled', user can retry or analyze partial results.
+
+Q
+How do you prevent job duplication on executor restart?
+A
+Idempotent job execution with state tracking:
+
+(1) Job uniqueness - each JobRun has unique run_id, executor stores currently_running_job = run_id in Redis on start,
+
+(2) Restart detection - on executor restart, check Redis for currently_running_job, if exists, it was killed mid-execution,
+
+(3) Status reconciliation - query DB for run_id status, if still 'running', mark as 'executor_died' (executor crashed), don't re-execute (prevents duplication),
+
+(4) Kafka offset management - executor commits Kafka offset AFTER job completes, on restart, uncommitted messages re-delivered (at-least-once),
+
+(5) Idempotency enforcement - job_id + scheduled_at combination ensures uniqueness, if executor tries to start job with same (job_id, scheduled_at), DB unique constraint fails, skip execution,
+
+(6) Exactly-once attempt - use Kafka transactions (Kafka 0.11+) with transactional.id per executor, ensures message processed and offset committed atomically. Trade-off: At-least-once (simpler, requires idempotent jobs) vs exactly-once (complex, guarantees no duplication but slower). Example: Executor E1 running Job J1 (run_id=R1) → E1 crashes → E1 restarts → checks Redis, finds currently_running_job=R1 → queries DB, R1 status='running' → updates R1 to 'executor_died', doesn't re-run → health check reschedules R1 with new run_id=R2 → counted as retry.
+
+Q
+What's your strategy for monitoring and alerting on job failures?
+A
+Multi-level monitoring and alerting:
+
+(1) Metrics collection - executors publish metrics to Prometheus/CloudWatch: job_success_count, job_failure_count, job_duration_ms, jobs_in_queue (by priority),
+
+(2) Failure thresholds - alert rules: single job failure rate >50% (6 of last 10 runs failed) = critical alert, overall system failure rate >10% in 1 hour = warning,
+
+(3) SLA monitoring - if job has SLA (must complete within 2 hours of schedule), alert if end_time - scheduled_at > 2 hours,
+
+(4) Dead letter queue size - alert if dead topic has >100 messages (indicates systemic issue, not isolated failures),
+
+(5) Executor health - alert if <30% executors healthy (capacity issue),
+
+(6) Dashboard - Grafana dashboard showing: jobs by status (pie chart), execution time trends (line graph), failure reasons (top 10 errors). Alert channels:
+
+(7) PagerDuty for critical (job X failed 5 times),
+
+(8) Slack for warnings (10% system failure rate),
+
+(9) Email daily digest of all failures. Example: ETL job fails 3 times in row → alert 'Job ETL_Pipeline failing (3/3 attempts), error: DB connection timeout' sent to Slack → on-call engineer investigates, finds DB overloaded → scales DB → job succeeds on retry 4.
+
+12. Key Numbers to Remember
+
+Scale & Throughput
+Job Volume — Millions of jobs per day, 1000s of jobs per second at peak
+Executors — 100-1000 executor instances for parallel execution
+Watcher Polling — Every 20 seconds, fetches up to 1000 jobs per poll
+Kafka Throughput — 10K messages/sec across all topics (run, retry, dead)
+Latency & Timing
+Scheduling Latency — ±2 seconds from scheduled time (watcher interval + Kafka latency)
+Executor Heartbeat — Every 10 seconds to Redis for health monitoring
+Health Check Interval — Every 30 seconds, marks executor dead after 60s no heartbeat
+Lock Expiry — 60 seconds for distributed locks (prevents deadlock)
+Retry & Recovery
+Default Retry Count — 3 retries (4 total attempts)
+Exponential Backoff — 60s, 120s, 240s for attempts 1, 2, 3 with jitter
+Job Timeout — Default 3600s (1 hour), configurable per job
+Cancellation Timeout — 30s for SIGTERM, then SIGKILL
+Database & Caching
+Watcher Query Limit — 1000 jobs per query (batch processing)
+Job Cache TTL — 5 minutes in Redis for job definitions
+Index Fields — next_run_time, status, last_polled_time for fast queries
+Kafka Retention — 7 days for replay capability
+Priority Scheduling
+Priority Levels — 1-10 scale (10=highest, 1=lowest)
+Consumer Allocation — High: 50 instances, Medium: 30, Low: 20
+Starvation Prevention — Boost priority if waiting >1 hour
+Monitoring Thresholds
+Failure Rate Alert — Single job >50% failure rate (6/10 runs)
+System Failure Alert — Overall >10% failure rate in 1 hour
+Dead Queue Alert — >100 messages in dead letter queue
+Executor Capacity Alert — <30% healthy executors remaining
+Example Calculation - Job Scheduling
+Watcher Poll — 20s interval, fetches 1000 jobs
+Lock Acquisition — 10ms per job (Redis SETNX)
+Kafka Publish — 50ms for batch of 1000 jobs
+Consumer Processing — 100ms from Kafka to executor assignment
+Total Latency — 20s (polling) + 0.16s (processing) = ~20s from schedule time
+Resource Allocation
+Executor Pool Size — 100 executors × 10 threads/executor = 1000 concurrent jobs
+Memory per Job — 512MB default, configurable up to 4GB
+CPU per Job — 0.5 vCPU default, configurable up to 4 vCPU
+Backfill Rate — 100 jobs/sec to prevent overload
