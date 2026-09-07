@@ -67,6 +67,8 @@ public class JobPersistenceService {
                 .scheduleType(command.getScheduleType())
                 .status(command.getStatus())
                 .scheduleTime(command.getScheduleTime())
+                .nextRunTime(command.getNextRunTime())
+                .lastPolledTime(command.getLastPolledTime())
                 .cronExpression(command.getCronExpression())
                 .payload(command.getPayload())
                 .retries(command.getRetries())
@@ -89,6 +91,12 @@ public class JobPersistenceService {
         job.setScheduleType(command.getScheduleType());
         job.setStatus(command.getStatus());
         job.setScheduleTime(command.getScheduleTime());
+        if (command.getNextRunTime() != null) {
+            job.setNextRunTime(command.getNextRunTime());
+        }
+        if (command.getLastPolledTime() != null) {
+            job.setLastPolledTime(command.getLastPolledTime());
+        }
         job.setCronExpression(command.getCronExpression());
         job.setPayload(command.getPayload());
         job.setRetries(command.getRetries());
