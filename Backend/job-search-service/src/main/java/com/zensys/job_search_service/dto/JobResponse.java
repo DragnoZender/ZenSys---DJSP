@@ -29,4 +29,8 @@ public class JobResponse {
     private Integer retries;
 
     private String meta;
+
+    private Instant nextRunTime;
+
+    private Instant lastPolledTime;
 }

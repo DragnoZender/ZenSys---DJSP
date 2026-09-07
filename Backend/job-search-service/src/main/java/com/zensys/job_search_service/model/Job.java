@@ -18,10 +18,8 @@ import lombok.NoArgsConstructor;
 @Table(
         name = "jobs",
         indexes = {
-                @Index(
-                        name = "idx_schedule_time",
-                        columnList = "schedule_time"
-                )
+                @Index(name = "idx_schedule_time", columnList = "schedule_time"),
+                @Index(name = "idx_watcher_poll", columnList = "next_run_time, status, last_polled_time")
         }
 )
 @Data
@@ -45,8 +43,14 @@ public class Job {
     @Column(nullable = false)
     private JobStatus status;
 
-    @Column(name = "schedule_time", nullable = false)
+    @Column(name = "schedule_time")
     private Instant scheduleTime;
+
+    @Column(name = "next_run_time")
+    private Instant nextRunTime;
+
+    @Column(name = "last_polled_time")
+    private Instant lastPolledTime;
 
     @Column(name = "cron_expression")
     private String cronExpression;

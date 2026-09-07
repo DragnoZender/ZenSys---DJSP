@@ -49,6 +49,8 @@ public class JobSearchService {
                 .payload(job.getPayload())
                 .retries(job.getRetries())
                 .meta(job.getMeta())
+                .nextRunTime(job.getNextRunTime())
+                .lastPolledTime(job.getLastPolledTime())
                 .build();
     }
 }
