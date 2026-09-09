@@ -15,7 +15,7 @@ Separating these tables provides a clear distinction between the **job definitio
 (Q) What if a job gets failed to execute in the executor?
 
 =>We need to retry the job in this case. 
- If the job gets failed to execute then the executor will push the job back in to the kafka queue, but the executor service unlike watcher service will not push the job in the 'run' topic, but in the separate topic as 'retry', Now when the Job_consumer_svc picks this job from the kafka queue, the Job_consumer_svc will need to inform the Job_table also that this is 2nd, 3rd or nth attempt to execute this job, so Job_Consumer_Svc will increment attempt_number filed of job entity by +1 respectively, and push it in the Job_table (via Kafka(ingest) -> Consumer_Svc -> Job_table) 
+ If the job gets failed to execute then the executor will push the job back in to the kafka queue, but the executor service unlike watcher service will not push the job in the 'run' topic, but in the separate topic as 'retry', Now when the Job_consumer_svc picks this job from the kafka queue, the Job_consumer_svc will need to inform the Job_table also that this is 2nd, 3rd or nth attempt to execute this job, so Job_Consumer_Svc will increment attempt_number field of job entity by +1 respectively, and push it in the Job_table (via Kafka(ingest) -> Consumer_Svc -> Job_table) 
 
 This above flow will be helpful to retry a job that did not got executed in the previous attempt, but if a job still not finshied even after perticluar attempt numbers like (10 attempts), then to avoid this infinite looping issue, we have a solution for this,that is before the executor push the failed job back in the kafka queue it will compare the attempt number with the 'retires'(allowed retries by user) filed of the Job entity if it execceds then push it the 'dead' topic instead of the retry topic, then watcher will push it in the 'dead' topic of the kafka queue,  
 
@@ -173,14 +173,49 @@ the watcher service will be polling the jobs based on the next_run_time field, w
 
  SELECT * FROM jobs WHERE status IN ('scheduled', 'running') AND next_run_time <= NOW() AND last_polled_time < (NOW - 30s) LIMIT 1000
 
-why the NOW() - 30s is used in the above query, because we want to avoid the duplicate polling of the same job by multiple instances of watcher service, so we are adding a buffer time of 30 seconds, so that if any instance of watcher service is polling the jobs and it takes more than 30 seconds to process the jobs, then other instances of watcher service will not poll the same jobs again.
+why the NOW() - 30s is used in the above query, because we want to avoid the duplicate polling of the same job by multiple instances of watcher service, so we are adding a buffer time of 30 seconds, so that if any instance of watcher service is polling the jobs and it sees that the last_pool_time is more than 30 secs that means the instance of watcher service which polled this job is facing some issue and is not able to process the job in time, so other instances of watcher service can poll this job again and process it, but if the last_polled_time is less than 30 secs that means the instance of watcher service which polled this job is still processing it and other instances of watcher service should not poll this job again to avoid duplicate processing of the same job.
+
 what if the 30s passes ?
 this situation may occur if the watcher service is down or facing some issue and it is not able to process the jobs in time, so to avoid this situation we are adding a buffer time of 30 seconds, so that if any instance of watcher service is polling the jobs and it takes more than 30 seconds to process the jobs, then other instances of watcher service will not poll the same jobs again.
 => If the 30s passes and the job is still not processed by any instance of watcher service, then the job will be polled again by other instances of watcher service, but this time the last_polled_time field will be updated to the current time, so that other instances of watcher service will not poll the same jobs again.
 
 Also the job status has been updated to add two new status as 'COMPLETED' and 'FAILED_PERMANENTLY', the 'COMPLETED' status is used when the job is completed successfully and the 'FAILED_PERMANENTLY' status is used when the job has failed after all the retries and it will be moved to the dead letter queue.
 
-job status life cycle is as follows:
 
-1. For the Once jobs, the status will be 'scheduled' when the job is created and it will be moved to 'running' when the job is picked by the watcher service and it will be moved to 'completed' when the job is completed successfully and it will be moved to 'failed_permanently' when the job has failed after all the retries and it will be moved to the dead letter queue.
+Date - 9th September 2026
 
+The watcher-service had been implemented with its main task is to fetch the job pool of 1000 jobs, avoid suplcation of pooling using last_polled_time and next_run_time fields, and updating the statud of the job to 'running' and pushing it to the executor kafka queue, and also updating the last_polled_time field to the current time, so that other instances of watcher service will not poll the same jobs again.
+
+the next_run_time field get updated based on the schedule_type of the job, if the job is a one-time job then the next_run_time field will be set to null, if the job is a recurring job then the next_run_time field will be set to the next scheduled time based on the cron expression of the job or the interval of the job. 
+
+The watcher service while pushing in the kafka run topic will mark the status of the job to running, and after that it is the responsblity of the further services to update the status as completed for ONCE job or back to SCHEDULED for RECURRING job, and all.
+
+
+sequenceDiagram
+    autonumber
+    participant W as Watcher Service
+    participant DB as PostgreSQL (jobs)
+    participant E as Executor / Consumer
+
+    Note over DB: Job is idle<br/>status = SCHEDULED<br/>next_run_time = 10:00
+    
+    W->>DB: 1. Polled at 10:00 (due!)
+    W->>DB: 2. Dispatches to Kafka & updates:<br/>status = RUNNING<br/>next_run_time = 11:00 (next occurrence)
+    
+    Note over DB: Job is actively executing<br/>status = RUNNING<br/>next_run_time = 11:00
+    
+    E->>E: 3. Runs task logic (e.g. 45 seconds)
+    E->>DB: 4. Task finishes (SUCCESS):<br/>toggles status back = SCHEDULED!
+    
+    Note over DB: Job is idle again<br/>status = SCHEDULED<br/>waiting for 11:00
+
+
+Also while publishg to the kafka run topic the watcher service will be passing the run_id ULID field as well this will ensure idepotency
+
+If Watcher generates run_id:
+=> If Kafka re-delivers the message (due to a consumer restart, timeout, or partition rebalance), the consumer sees the same run_id. It can check jobRunRepository.existsById(runId) or rely on a DB unique constraint to say: "I already created this run record, ignore duplicate."
+
+If Consumer generates run_id:
+=> Every time the consumer picks up the message, it generates a new run_id and inserts a duplicate row into job_runs. You end up running the same scheduled job multiple times.
+
+as we choose to have the run_id generated by the watcher service, so that the consumer can check if the run_id already exists in the job_runs table, if it exists then it will not create a new job_run entry and will ignore the duplicate message from kafka.

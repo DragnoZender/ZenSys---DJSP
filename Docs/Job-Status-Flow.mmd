@@ -1,0 +1,53 @@
+ONCE (One-Time Job)
+
+stateDiagram-v2
+    direction LR
+    [*] --> SCHEDULED: Created
+    SCHEDULED --> RUNNING: Watcher picks up,<br/>publishes to 'run'
+
+    state "Executor runs" as exec
+    RUNNING --> exec
+
+    exec --> COMPLETED: ✅ Success
+    exec --> SCHEDULED: ❌ Failed<br/>(retries left)
+    exec --> FAILED_PERMANENTLY: ❌ Failed<br/>(no retries left)
+
+    COMPLETED --> [*]: Done forever.<br/>next_run_time = null
+    FAILED_PERMANENTLY --> [*]: Dead letter queue
+
+    note right of COMPLETED: Job is FINISHED.<br/>No next_run_time recalculated.
+
+
+
+CRON (Recurring on Schedule)
+
+stateDiagram-v2
+    direction LR
+    [*] --> SCHEDULED: Created
+
+    SCHEDULED --> RUNNING: Watcher picks up
+
+    state "Executor runs" as exec
+    RUNNING --> exec
+
+    exec --> SCHEDULED: ✅ Success<br/>🔄 Recalculate next_run_time<br/>from cron expression
+    exec --> SCHEDULED: ❌ Failed (retries left)
+    exec --> FAILED_PERMANENTLY: ❌ Failed (no retries)
+
+    note right of SCHEDULED: Loops forever!<br/>SCHEDULED → RUNNING → SCHEDULED
+
+
+INTERVAL (Recurring at Fixed Interval)
+
+stateDiagram-v2
+    direction LR
+    [*] --> SCHEDULED: Created
+
+    SCHEDULED --> RUNNING: Watcher picks up
+
+    state "Executor runs" as exec
+    RUNNING --> exec
+
+    exec --> SCHEDULED: ✅ Success<br/>🔄 next_run_time =<br/>NOW + intervalSeconds
+    exec --> SCHEDULED: ❌ Failed (retries left)
+    exec --> FAILED_PERMANENTLY: ❌ Failed (no retries)
