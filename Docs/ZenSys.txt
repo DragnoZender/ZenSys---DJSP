@@ -12,8 +12,24 @@ Non Functional Requirements
 - Scale: 10k jobs/sec
 - CAP Theorem: Availability > Consistency
 - Job should run at least once
-- Latency: The system should execute the jobs within 2s of their
-scheduled time
+- Latency: The system should execute the jobs within 2s of their scheduled time
+
+
+Scale & Performance
+Job Volume — Millions of jobs per day, thousands of jobs per second
+Executors — 100s of executor instances for parallel job execution
+Latency — Jobs should execute within 2s of scheduled time (±2s tolerance)
+
+Reliability & Consistency
+CAP Theorem — Availability >> Consistency (Job should run at least once, eventual consistency acceptable)
+Execution Guarantee — At-least-once execution (jobs may retry on failure, idempotency required)
+Durability — Job state persisted, no jobs lost even on system failure
+
+Scheduling Requirements
+Cron Support — Standard cron expressions (0 0 * * * for daily at midnight)
+Time Zones — Support scheduling in different time zones
+Backfill — Ability to run missed jobs (if scheduler was down)
+
 
 
 2. Core Entities
