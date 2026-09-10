@@ -266,9 +266,9 @@ this gives, O(1)
 
 Full Comparison Table
 
----------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------
 |Factor	                        |Approach A (Direct DB)	                                    |    Approach B (Via Kafka)   
---------------------------------|------------------------------------|-----------------------------------------------------                      
+--------------------------------|------------------------------------|-----------------------------------------------------------------                      
 |DB Connections at 100 runners	|~1,100 (exceeds limits)	                            |    ~130 (fixed)
 
 |DB Connections at 500 runners	|~5,100 (impossible)	                                    |    ~130 (still fixed)
@@ -286,7 +286,7 @@ Full Comparison Table
 |Runner pom.xml	                |JPA + PostgreSQL + connection pool	                    |    Kafka only (lightweight)
 
 |Backpressure	                |DB overload → connection timeouts → cascading failure	    |    Kafka queues up → consumer catches up
-
+------------------------------------------------------------------------------------------------------------------------------------------
 
 Note - The only trade-off is 50-200ms of extra latency for status updates. For a job scheduler processing jobs that run for seconds to hours, this latency is completely negligible.
 
@@ -373,3 +373,24 @@ Yes,
 The Toggle: Happens on the master jobs table (SCHEDULED <->  RUNNING).
 Layer 2: Protects the individual job_runs records so that delayed or out-of-order execution messages never accidentally overwrite or corrupt the master job's SCHEDULED status.
 also a job_run entry never toggles it only goes in one way direction (PENDING -> RUNNING -> SUCCESS/FAILED) and never goes back to PENDING or RUNNING once it is in SUCCESS or FAILED state, so the SCHEDULED - RUNNING toggle for the CRON and INTERVAL jobs is ensured.
+
+
+
+Date - 10th September 2026
+
+Now we will build the executor serivce 
+
+so the roles of the serivces are as follows:
+
+1. wathcer-service - decides when a job is due 
+2. job-consumer-service - decides which worker/executor receives it
+3. executor-service -  the component that actually executes the job logic and reports the outcome.
+
+
+Core Identity of executor-service :
+
+1. Stateless Worker: Like job-consumer-service, it has no direct database connection (Approach B). It communicates outcomes exclusively via Kafka events.
+2. Horizontally Scalable: In production, you can run dozens or hundreds of executor instances. Eureka + Feign automatically distribute jobs across them.
+
+
+For the Executor-service as per my intitial plan, the heartbeats to send to the kakfa every 10sec (as the current Status of the Job) so the consumer service can then continuosly keep updating the job_run entry status, and for each heartbeat, also updating the modifcation_time = now(), but there is the major issue with this approach, as the executor service is stateless and can be scaled horizontally, so if we have 100 executor instances running in parallel and each instance is sending the heartbeat to the kafka every 10 sec, then the consumer service will be receiving 100 heartbeats of different job_runs every 10 sec, which will lead execessive bottlneck issue 
