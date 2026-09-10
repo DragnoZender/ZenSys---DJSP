@@ -393,4 +393,145 @@ Core Identity of executor-service :
 2. Horizontally Scalable: In production, you can run dozens or hundreds of executor instances. Eureka + Feign automatically distribute jobs across them.
 
 
-For the Executor-service as per my intitial plan, the heartbeats to send to the kakfa every 10sec (as the current Status of the Job) so the consumer service can then continuosly keep updating the job_run entry status, and for each heartbeat, also updating the modifcation_time = now(), but there is the major issue with this approach, as the executor service is stateless and can be scaled horizontally, so if we have 100 executor instances running in parallel and each instance is sending the heartbeat to the kafka every 10 sec, then the consumer service will be receiving 100 heartbeats of different job_runs every 10 sec, which will lead execessive bottlneck issue 
+For the Executor-service as per my intitial plan, the heartbeats was supposed to be send to the kakfa every 10sec (as the current Status of the Job) so the consumer-service can then continuosly keep updating the job_run entry status, and for each heartbeat, also updating the modifcation_time = now(), but there is the major issue with this approach, as the executor-service is stateless and can be scaled horizontally, so if we have 100 executor instances running in parallel and each instance is sending the heartbeat to the kafka every 10 secs, then the consumer service will be receiving 100s of heartbeats of different job_runs every 10 sec, which will lead major database bottlneck
+
+PostgreSQL does not update rows in place. Every UPDATE writes a new row version to disk and leaves dead tuples behind. 500 writes/sec just to update a timestamp column will:
+1. Cause massive table bloat on job_runs.
+2. Put heavy lock contention and write IOPS on the database.
+3. Force PostgreSQL autovacuum to run aggressively, eating up CPU.
+
+Hence to avoid this issue, while still keeping the executor-service heartbeat checking functionality we will use the Redis cache
+
+How the Redis Heartbeat Approach Actually Works
+This pattern is known in engineering as a "Dead Man's Switch" (like in trains, where the driver must press a pedal every 30 seconds; if the driver passes out and stops pressing, the train automatically detects it).
+
+
+
+Here is the exact step-by-step lifecycle:
+
+
+A. Normal Healthy State
+
+
+                  ┌─────────────────────────────────────────────────────────┐
+                  │                 NORMAL HEALTHY STATE                    │
+                  └─────────────────────────────────────────────────────────┘
+
+[executor-service]                                                [Redis]
+ (worker-01)                                                   (In-Memory)
+      │                                                             │
+      │── Every 10s: SET executor:worker-01:alive "OK" EX 30 ──────>│ Key created with 30s timer
+      │                                                             │ (Timer: 30s -> 20s...)
+      │                                                             │
+      │── 10s later: SET executor:worker-01:alive "OK" EX 30 ──────>│ Timer resets back to 30s!
+      │                                                             │ Key never expires!
+
+
+
+B. Executor Crashes or Stops Heartbeating
+
+                  ┌─────────────────────────────────────────────────────────┐
+                  │               CRASH / OUTAGE DETECTION                  │
+                  └─────────────────────────────────────────────────────────┘
+
+[executor-service]                                                [Redis]
+ (worker-01)                                                   (In-Memory)
+      │                                                             │
+     💥 WORKER CRASHES!                                            │ Timer ticking down:
+     (Out of memory, server down)                                   │ 30s... 20s... 10s... 0s!
+      │                                                             │
+     ❌ No more heartbeats sent                                    🔥 Redis automatically
+                                                                      erases the key!
+                                                                            │
+                                                                            ▼
+                                                                     [watcher-service]
+                                                                     Checks Redis every 30s:
+                                                                     "Where is worker-01?"
+                                                                     -> Missing!
+                                                                     -> Finds orphaned jobs
+                                                                     -> Reschedules them!
+
+
+
+
+## Step-by-Step Breakdown
+
+Step 1: Executor Sends Heartbeat (Every 10 seconds)
+
+Inside executor-service, a tiny scheduled background method runs every 10 seconds:
+
+java
+
+// Spring Boot code inside executor-service:
+
+@Scheduled(fixedRate = 10000) // every 10s
+public void sendHeartbeat() {
+    // Sets key with a 30-second auto-expiration (TTL)
+
+    redisTemplate.opsForValue().set(
+        "executor:" + myExecutorId + ":heartbeat", 
+        "ALIVE", 
+        Duration.ofSeconds(30)
+    );
+}
+Cost: 1 network call in memory (~0.2 milliseconds).
+Load on Postgres: 0%.
+
+Step 2: While Healthy
+        - Every 10 seconds, the executor refreshes the key.
+        - The 30-second countdown resets back to 30.
+        - As long as the executor is healthy, the key never dies.
+
+Step 3: What Happens if the Executor Crashes?
+        - The worker process dies (power cut, machine failure, killed by OS).
+        - It stops sending heartbeats.
+        - After 30 seconds, Redis automatically evicts the key from memory.
+
+Step 4: Watcher Recovers the Abandoned Jobs
+        - watcher-service periodically scans running jobs:
+
+        It queries: SELECT * FROM job_runs WHERE status = 'RUNNING'
+        For each running job, it checks: redisTemplate.hasKey("executor:" + run.getExecutorId() + ":heartbeat")
+
+        If the key exists: 
+                - the worker is alive, job is fine.
+
+        If the key is gone:
+                - The worker has died!
+                - Watcher marks that run as status = 'EXECUTOR_DIED' in the database.
+                - Watcher re-publishes the job to Kafka run topic so another healthy worker can pick it up.
+
+
+
+
+Why this is so superior to the Kafka $\rightarrow$ Postgres approach:
+
+1. Zero Database Churn: PostgreSQL is not burdened with hundreds of useless UPDATE queries every few seconds.
+2. Instant & Automatic: You don't write complex cleanup logic for dead workers—Redis's TTL does the deletion for free.
+3. High Scale: 10,000 executors sending heartbeats every 10 seconds to Redis consumes less than 2% of Redis's CPU capacity.
+
+
+
+The Killer Feature for Heartbeats: Auto-Expiring Keys (TTL)
+
+        - In PostgreSQL, if you write a row, it stays there forever until you explicitly run a DELETE query.
+        
+        - In Redis, you can attach a TTL (Time To Live) to any key:
+          "Hey Redis, store this key executor:worker-1:heartbeat, and automatically delete it after 30 seconds."
+        
+        - This is what makes Redis the foundation of health checking in distributed systems.
+
+
+
+
+| ---------------------------------------------------------------------------------------------------------------------------
+| Metric	                     |   Kafka ->  PostgreSQL Updates	              |  Redis Executor Heartbeat with TTL
+| ---------------------------------------------------------------------------------------------------------------------------
+| PostgreSQL Write Load	             |   🔴 Very High (500–1000 writes/sec)	      |  🟢 Zero writes
+| 
+| Table Bloat & Vacuum	             |   🔴 Severe disk churn	                      |  🟢 None (in-memory)
+| 
+| Failure Detection	             |   Slow (querying DB for stale timestamps)      |  Instant (key expiration via TTL)
+| 
+| Network Traffic	             |   High (1 message per job)	              |  Low (1 message per executor)
+-----------------------------------------------------------------------------------------------------------------------------
