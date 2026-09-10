@@ -613,3 +613,75 @@ Fixed pool (20): 20 jobs in parallel (prevents server overload).
 Virtual threads: Hundreds of jobs in parallel with minimal memory (modern Java 21+ standard).
 
 Hence we are going with the use of virtual threads so even if we have 100s of jobs to be executed in parallel by the same executor instance, we can easily handle it with the use of virtual threads without any performance issue or resource exhaustion or need to perform horizonatal scaling of the executor-service instances.
+
+
+Now next question
+What tasks to perform in the executor-service?
+for intitial phase we will have only this basic 3 task to perfrom
+
+1. HTTP Request - Make an HTTP request to a given URL with optional headers and body, and capture the response status code and body.
+
+
+2. Simulated task
+
+        - Simulate a task that takes a specified amount of time to complete, useful for testing and demonstration purposes.
+        - A Simulated Task is a built-in mock execution tool. It allows you to test, demo, and stress-test the entire ZenSys platform without needing an external third-party server or API.
+
+How the Simulated Task Works
+
+Instead of an HTTP call, you give the job a payload with durationMs:
+
+1. Test Normal Success (e.g., 3-second task)
+
+json
+{
+  "durationMs": 3000
+}
+
+The executor sleeps for 3 seconds (simulating heavy calculation, ETL, or file processing) and then completes with status = SUCCESS.
+
+
+
+2. Test Failure & Retry Mechanics
+
+json
+{
+  "durationMs": 1000,
+  "fail": true,
+  "errorMessage": "Database connection timed out"
+}
+
+ - The executor runs for 1 second, throws an exception, and marks the job as FAILED.
+ 
+ - This lets you immediately verify:
+        - Does the executor publish to the Kafka retry topic?
+        - Does the exponential backoff work?
+        - After 3 retries, does it land in the dead letter queue?
+
+
+
+3. Test Hard Timeout Enforcement
+
+json
+{
+  "durationMs": 60000,
+  "timeoutSeconds": 5
+}
+
+The task wants to run for 60 seconds, but has a 5-second timeout.
+You can verify that the executor kills the task after 5 seconds and publishes a TIMEOUT event!
+
+
+
+Why It's Great for "Benchmarking & Load Testing"
+If you want to test whether ZenSys can really handle thousands of jobs per second:
+
+You can create 1,000 jobs with {"durationMs": 500}.
+All 1,000 jobs will flow through: 
+┌──────────┐    ┌─────────┐    ┌──────────────┐     ┌────────────────────────┐     ┌───────┐
+│ Postgres │───▶│ Watcher │───▶│ Job Consumer│───▶│ Executor (Virtual      │───▶│ Kafka  │
+└──────────┘    └─────────┘    └──────────────┘     │ Threads)               │     └───────┘
+                                                    └────────────────────────┘
+You can safely measure CPU usage, throughput, and memory without making a single external network request.
+
+
