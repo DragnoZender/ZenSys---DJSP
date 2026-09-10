@@ -535,3 +535,81 @@ The Killer Feature for Heartbeats: Auto-Expiring Keys (TTL)
 | 
 | Network Traffic	             |   High (1 message per job)	              |  Low (1 message per executor)
 -----------------------------------------------------------------------------------------------------------------------------
+
+
+For the Job execution we will be using multithreading in the executor-service, so that multiple jobs can be executed in parallel by the same executor instance, and also we will be using the thread pool to limit the number of threads created by the executor-service, so that it does not create too many threads and exhaust the system resources.
+
+threadpool size = 20 Threads, 
+
+So why to use multithreading ?
+
+The Problem with a Single Thread: "Head-of-Line Blocking"
+
+Imagine you are running a single thread, and two jobs arrive at your executor:
+
+Job 1: An HTTP webhook that takes 10 seconds to respond.
+Job 2: A quick task that takes 100 milliseconds.
+
+If you only have 1 thread:
+
+The single thread is 100% occupied running Job 1 for the next 10 seconds.
+
+Job 2 arrives at 0.1s, but cannot start. It is forced to wait in a queue for 9.9 seconds until Job 1 completely finishes!
+
+
+If 10 jobs arrive at once, and each takes 10 seconds:
+Job 1 finishes at 10s
+Job 2 finishes at 20s
+Job 10 finishes at 100s!
+
+Your server's CPU and RAM are 95% idle, but your system is creeping at a snail's pace because jobs are running sequentially in a single file line.
+
+
+Why a Thread Pool (e.g. 20 Threads)?
+Most jobs are I/O bound (waiting for an HTTP API to respond, waiting for a database query, or sleeping):
+
+While Thread 1 is sitting idle waiting for an external HTTP server to reply, the CPU is doing nothing.
+With a pool of 20 threads, 20 jobs can run at the exact same time in parallel:
+20 jobs that each take 10 seconds will all finish in 10 seconds (instead of taking 200 seconds!).
+
+
+But but but !!!
+
+we got even better option with the modern java 
+
+** The  Virtual Threads (Since java 21) ** 
+
+
+Virtual Threads were introduced as a permanent feature in Java 21 as part of Project Loom.
+
+The main idea is simple:
+        " Virtual threads are lightweight threads managed by the JVM rather than directly mapped 1:1 to operating-system threads. "
+
+They are designed primarily for applications that perform lots of I/O operations—HTTP requests, database calls, file operations, Kafka communication, etc.
+
+
+
+Because the project is using Java 25, we don't even have to limit to a fixed pool of 20 OS threads.
+
+Java introduced Virtual Threads (Project Loom):
+
+java : 
+
+// Instead of a fixed pool of 20 heavy operating-system threads:
+this.workerPool = Executors.newFixedThreadPool(20);
+
+// You can use lightweight Virtual Threads:
+this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+
+
+Why Virtual Threads are magical for this:
+        1. Virtually Unlimited Concurrency: Virtual threads take only a few kilobytes of RAM (compared to ~1MB for a platform thread). You can run thousands of jobs concurrently on a single node.
+        2. Zero Head-of-Line Blocking: When a virtual thread waits on an HTTP call or timeout, Java unmounts it from the CPU so other jobs continue running instantly.
+
+
+Summary
+Single thread: Only 1 job at a time (serial execution, massive delays).
+Fixed pool (20): 20 jobs in parallel (prevents server overload).
+Virtual threads: Hundreds of jobs in parallel with minimal memory (modern Java 21+ standard).
+
+Hence we are going with the use of virtual threads so even if we have 100s of jobs to be executed in parallel by the same executor instance, we can easily handle it with the use of virtual threads without any performance issue or resource exhaustion or need to perform horizonatal scaling of the executor-service instances.
