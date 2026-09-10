@@ -685,3 +685,50 @@ All 1,000 jobs will flow through:
 You can safely measure CPU usage, throughput, and memory without making a single external network request.
 
 
+
+
+Succesfully Implemented Executor-service
+
+Obseravtion - Why in upstash i can only see one executor-heartbeat entry at-a-time ?
+
+=> That is by design, and is exactly how it should work!
+
+Here is why:
+
+1. Redis is a Key-Value Store (In-Place Update, Not Append-Only)
+In a database like PostgreSQL, when you run an INSERT, it creates a new row every time.
+
+In Redis, when you do SET key value:
+
+At 10s: SET executor:executor-8086:heartbeat "20:01:10" -> Creates key.
+At 20s: SET executor:executor-8086:heartbeat "20:01:20" -> Updates the exact same key in place!
+At 30s: SET executor:executor-8086:heartbeat "20:01:30" -> Updates the exact same key in place!
+
+Because the key name is always executor:executor-8086:heartbeat, Redis simply updates the timestamp and resets the 30-second TTL timer on that one single key.
+
+
+2. Why this is the Intended Behavior
+
+A heartbeat answers a simple question:
+-> "Is executor-8086 alive right now?"
+
+We do not need a historical archive of every second in the past.
+Having one key per executor means:
+Zero memory bloat: Redis memory usage remains tiny (~few bytes) forever.
+
+Instant lookup : watcher-service only has to check if executor:executor-8086:heartbeat exists.
+
+
+3. When will you see multiple entries?
+You will see multiple keys when you run multiple executor instances!
+
+Instance 1 on port 8086: executor:executor-8086:heartbeat
+Instance 2 on port 8087: executor:executor-8087:heartbeat
+Instance 3 on port 8088: executor:executor-8088:heartbeat
+If you run 5 workers, you will see exactly 5 keys in Upstash—one for each active worker.
+
+Cool test to try:
+Since you stopped your application in the terminal:
+
+Look at Upstash after 30 seconds $\rightarrow$ you will see that the key disappears completely!
+That is the TTL / Dead Man's Switch working in real-time. If the worker stops, Redis automatically cleans up!
