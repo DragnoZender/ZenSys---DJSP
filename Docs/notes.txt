@@ -537,6 +537,15 @@ The Killer Feature for Heartbeats: Auto-Expiring Keys (TTL)
 -----------------------------------------------------------------------------------------------------------------------------
 
 
+Also since we are using OpenFeign + Eureka Service Discovery for connection between the job-consumer-service and executor-service, it provides the spring cloud's load balancing feature, so that the job-consumer-service can send the job to any of the available executor-service instance, and also if any of the executor-service instance goes down, then the job-consumer-service will not send the job to that instance and will send it to any of the available instance, this will ensure that the jobs are distributed evenly across all the available executor-service instances and also if any of the executor-service instance goes down, then the jobs will be sent to other available instances without any downtime or failure.
+
+if this was not there we would have need to send one more heartbeat to the redis that carries the current executing job count to the redis and the job-consumer-service will have to check the current executing job count of each executor-service instance from the redis and then send the job to the instance which has the least executing job count, but with the load balancing feature of the spring cloud, we don't need to do this, as it will automatically distribute the jobs across all the available instances of executor-service.
+
+So thanks to the springboot for giving built-in load balancing
+
+
+
+
 For the Job execution we will be using multithreading in the executor-service, so that multiple jobs can be executed in parallel by the same executor instance, and also we will be using the thread pool to limit the number of threads created by the executor-service, so that it does not create too many threads and exhaust the system resources.
 
 threadpool size = 20 Threads, 
@@ -725,10 +734,110 @@ You will see multiple keys when you run multiple executor instances!
 Instance 1 on port 8086: executor:executor-8086:heartbeat
 Instance 2 on port 8087: executor:executor-8087:heartbeat
 Instance 3 on port 8088: executor:executor-8088:heartbeat
-If you run 5 workers, you will see exactly 5 keys in Upstash—one for each active worker.
+If we run 5 workers, we will see exactly 5 keys in Upstash—one for each active worker.
 
 Cool test to try:
-Since you stopped your application in the terminal:
+Since we stopped our application in the terminal:
 
 Look at Upstash after 30 seconds $\rightarrow$ you will see that the key disappears completely!
 That is the TTL / Dead Man's Switch working in real-time. If the worker stops, Redis automatically cleans up!
+
+
+Date - 15th September 2026
+
+Now the Happy path completed, we need to implement the retry pipeline
+
+we will create a dedicated service called retry-service, whose job is to consume from the "retry" topic and and publish the job_run back to the kafka "run" topic after delayTime as sent by the executor-service.
+
+why this looping instead of simply consuming from the retry topic by the JCS and update attempt count n forward to executor-service
+
+=> to make the clean flow and keeping the 'run' topic as a single source for dispatccher i.e. the JCS, this is called as "Canonical Funnel" Pattern (Uber & Netflix)
+Companies like Uber (who published the famous paper "Reliable Reprocessing and Dead Letter Queues with Apache Kafka"), Netflix, and Temporal all use the Loop (Republish to run) pattern.
+
+
+                  ┌──────────────────────────────────────────────┐
+                  │                 ENTRY FUNNEL                 │
+                  └──────────────────────────────────────────────┘
+                                          │
+       ┌──────────────────┬───────────────┴───────────────┬──────────────────┐
+       ▼                  ▼                               ▼                  ▼
+[watcher-service]   [Manual RunNow API]           [retry-service]     [Backfill Scheduler]
+ (New Cron Jobs)    (Ad-hoc execution)           (Delayed Retries)    (Missed executions)
+       │                  │                               │                  │
+       └──────────────────┴───────────────┬───────────────┴──────────────────┘
+                                          ▼
+                                ┌───────────────────┐
+                                │ Kafka 'run' Topic │  <--- SINGLE SOURCE OF TRUTH
+                                └─────────┬─────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │ job-consumer-service  │
+                              │     (Dispatcher)      │
+                              └───────────┬───────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │   executor-service    │
+                              │       (Worker)        │
+                              └───────────────────────┘
+
+
+Why MAANG Architects Insist on Republishing to run:
+1. Single Source of Truth (run topic): The dispatcher service has only one job: take work that is ready right now and dispatch it to an executor. It does not care whether the job is brand new from watcher-service, a retry from attempt 2, or an ad-hoc trigger from a user!
+2. Independent Scaling: The component managing retries scales independently from the workers executing jobs.
+3. Strict Durability: A job waiting for a retry is stored in a durable delay mechanism (e.g. Redis Sorted Set with timestamps or tiered Kafka delay topics). If the service crashes, the timer is not lost. When the timer hits zero, it is emitted to run.
+
+How to Answer This in an Interview (Verbatim Script)
+
+"In Kafka, we avoid in-memory sleep or delaying directly inside the dispatcher consumer because Kafka is not a point-to-point delay queue—sleeping causes partition head-of-line blocking and risking message loss on pod termination.
+Instead, we follow the Canonical Ingress Funnel pattern: failed tasks with remaining retries are placed into a delayed retry pipeline with exponential backoff. Once the delay elapsed, the message is re-published to the primary run topic with an incremented attempt count.
+This decouples execution dispatching from scheduling delays, ensures the run topic remains the single source of truth, and guarantees at-least-once execution even if nodes crash during the backoff period."
+
+
+But for the dealy to publish in the "run" we can't simply make the retry service to sleep the thread for the dealy, this is dangerous and causes multiple issues like 
+        1. A job with dealy time 30 mins arrive if the thread sleeps for that time other jobs in the line with even lower dealy time like 10-20 secs or a min has to wait in the queue as well.
+        2. If the service crashed during that sleep period the in-memory data for that perticluar retry job is lost from the retry topic and the memeory also, causing major data loss
+
+
+The solution is to have the retry-service consume from the retry queue, put the job_run in a safe storage for the dealy time, and once the dealy time completes pick the from the safe storage and publsih back in the 'run' topic
+
+To achieve this we will be using redis + retry-service
+
+How MAANG Systems Guarantee Zero Data Loss: Durable Delay Store (Redis ZSET) :
+
+1. To have true zero data loss, the delayed task cannot sit in JVM RAM—it must be placed into a durable, persistent store.
+
+2. Because we already have Upstash Redis in our tech stack, here is how the production-grade, crash-resilient pattern works:
+
+A.
+
+[Kafka 'retry' Topic]
+         │
+         ▼
+[retry-service]
+         │
+         ├──> 1. Writes to Redis Sorted Set: ZADD retry:delayed <dueTimestamp> <jobJson>
+         │    (Data is now safe in Redis persistence!)
+         │
+         └──> 2. Commits Kafka offset (Safe! If node crashes, Redis still has it)
+
+
+
+B. 
+
+[Background Poller / Sweeper in job-consumer-service] (Runs every 1s)
+         │
+         ▼
+1. Queries Redis: ZRANGEBYSCORE retry:delayed 0 <NOW>
+2. Removes from Redis (atomic)
+3. Publishes to Kafka 'run' topic!
+
+
+Why the Redis Sorted Set (ZSET) Guarantees Zero Data Loss
+1. Crash at second 5: The server reboots. The job is still sitting safely in Redis.
+2. Crash at second 25: The server reboots. As soon as NOW >= dueTimestamp, the sweeper reads it from Redis and emits it to run.
+3. No Kafka Partition Blocking: The Kafka retry consumer never sleeps or pauses. It consumes fast, saves to Redis, and commits.
+4. Single Source of Truth: Ready jobs still flow through the same run topic ingress funnel.
+
+
