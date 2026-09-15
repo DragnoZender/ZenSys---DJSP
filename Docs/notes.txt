@@ -841,3 +841,189 @@ Why the Redis Sorted Set (ZSET) Guarantees Zero Data Loss
 4. Single Source of Truth: Ready jobs still flow through the same run topic ingress funnel.
 
 
+Now in the implemented flow, when the retry-service (RS) consumes from the kafka 'retry' it deals with the two data structures in the Redis 
+
+1. String key-value → for deduplication - unique key stored as {String dedupKey = "retry:dedup:" + event.getJobId() + ":" + event.getAttempt();}
+
+2. Sorted Set (ZSET) → for delayed retry jobs - Delayed retry data :
+
+        DelayedRetryItem item = DelayedRetryItem.builder()
+            .retryId(...)
+            .originalRunId(...)
+            .jobId(...)
+            .payload(...)
+            .attempt(...)
+            .maxRetries(...)
+            .retryDelaySeconds(...)
+            .dueTimestampMs(...)
+            .createdAt(...)
+            .build();
+
+        This object contains the actual retry information.
+
+
+The issue found in the flow !!!
+As of now we where creating the key with TTL of 10-mins fixed, that means once 10mins completed the key will be erased from the Redis 
+
+suppose key expires after 600 seconds but what if a item is scheuled to execute after that 600 seconds expiry?
+
+The Real Risk: The Expiry Breaks
+
+intuition is spot on regarding what happens if delaySeconds > 600s:
+
+1. Suppose Job A fails (Attempt 1 $\rightarrow$ Attempt 2) with a 15-minute delay (900s).
+
+2. RetryEventConsumer sets retry:dedup:jobA:2 with TTL = 600s (10 min) and buffers the item into retry:delayed.
+
+3. At minute 11, the dedupKey expires and disappears from Redis. The item is still in the ZSET waiting for minute 15.
+
+4. If a Kafka consumer rebalance, pod restart, or redelivery re-reads that same JobRetryEvent at minute 12:
+        - setIfAbsent("retry:dedup:jobA:2") returns true (because the old key expired).
+        - A duplicate item is added to retry:delayed.
+
+5. At minute 15, the sweeper pops two items for Attempt 2, and the job runs twice!
+
+
+The MAANG-Grade Solution: Dynamic TTL
+The deduplication key must live for at least the entire duration the item is waiting in the queue, plus a safety margin:
+
+for each retry entry we will have the key with dynamic TTL = dealyTime + 5 mins buffer, so this will ensure that the key for the zset entry remains alive until the item is picked from the ZSET
+
+
+Now up until now the putting to redis is done, now how will it get consume? 
+
+=> for this we will be having a Swepper implemented that checks every second the redis zset for the dueTimestampMs acting as score of the ZSET and once the delaytime <= current time, select the job from the zset and delete it, to make this selection + deletion action atomic so that it is crash proof and no multiple instances of the retry-service pulls the same data from the redis we are using the LUA script, which is used to have atomic process like @Transactional for SQL  
+
+now on arrival of the time publish the job_run back to the 'run' topic
+
+*** Intreasting find out ***
+
+As the retry-service deals with 2 external entites at a time kafka and redis and the wanted flow is that once picked from the redis-ZSET put in the kafka 'run', no data lost between this flow or no duplication in between.
+
+that is we want - {At least once} and {At most once} at a same time, but in distributed architecture this is not possible.
+
+
+So we will prioritize the at-least-once principle, to achive it the issue for it can happen as follow :
+
+
+1. Lua Script runs: ZRANGEBYSCORE + ZREM (Item is DELETED from Redis)
+               ▼
+   [CRASH / SIGKILL / NETWORK PARTITION / OOM]  <--- IF CRASH HAPPENS HERE
+               ▼
+2. Java code sends message to Kafka 'run' topic
+
+
+
+If the container or service crashes at that exact moment:
+        - The item was already removed from Redis.
+        - The item was never sent to Kafka.
+        - Result: Permanent data loss. The job run will vanish into thin air.
+
+
+
+The MAANG-Grade Solution: Visibility Timeout (Leasing Pattern) :
+
+This is the exact pattern used by AWS SQS, Temporal, Cadence, and Celery:
+
+Rule: Never delete an item from the queue until the downstream destination (Kafka) confirms with a broker acknowledgment (ACK).
+
+Instead of deleting (ZREM) the item upfront, the sweeper claims a temporary lease on the item by bumping its score into the future (e.g., $+30$ seconds):
+
+This removes the {selection + deletion} atomic flow and instead implments {Selecting + Leasing (Hiding)} is 100% atomic.
+
+what is Leasing? 
+- Suppose current time is 12:00:00 (timestamp: 1000). The sweeper finds an item with score 1000.
+Instead of deleting it, it bumps its score into the future by $+30$ seconds: {New Score} = 1000 + 30000 = 31000 (12:00:30)
+Now, that item is still in Redis, but it is hidden (leased) because its score is in the future. No other sweeper instance will touch it
+
+And during this 30 secs gap it is expected that the spring kafka will publish this data in the kafka 'run' topic
+
+Outcome A: The Normal Case (Success)
+        1. Sweeper gets the item.
+        2. Sweeper publishes it to Kafka and waits for Kafka's broker ACK.
+        3. Kafka says: "Got it, safely saved to disk!"
+        4. Sweeper deletes the item from Redis:
+                redisTemplate.opsForZSet().remove(zsetKey, itemJson);
+                The lease is closed, and the task is done.
+
+
+Outcome B: The Crash Case (Zero Data Loss!)
+        1. Sweeper gets the item (score was pushed to 12:00:30). as {section + leasing} is atomic
+        2. The machine suddenly crashes / loses power before sending to Kafka.
+        3. At 12:00:30 (30 seconds later):
+                1. The current time becomes 12:00:30.
+                2. The item's score is now <= currentTime again!
+                3. Another running instance of retry-service (or the restarted pod) sees the item is due again and picks it up!
+                4. No message is ever lost.
+
+** Why is Leasing So Popular in Big Tech (AWS, Netflix, Uber)?
+        -Amazon SQS calls this Visibility Timeout.
+        -Google Chubby & Apache ZooKeeper use leases to detect dead master nodes.
+        -Why? Because in distributed systems, network partitions and hardware crashes are guaranteed to happen. A lease ensures you don't need complicated monitoring to recover lost tasks — time itself cleans up and recovers the task automatically.
+                     
+
+        
+
+2. Why Selecting + Deleting is NOT Atomic (and why that's intentional)
+
+|Approach                                                   | Atomic? |  JVM Crash Event                                             |    Delivery Guarantee
+|-----------------------------------------------------------|---------|--------------------------------------------------------------|---------------------------
+|Old Implementation (ZRANGEBYSCORE + ZREM in Lua)           |   YES   |  Item deleted from Redis -> Permanent Data Loss.             |    At-Most-Once (Risky)
+|                                                           |         |                                                              |
+|Current Implementation (Lease -> Kafka ACK -> ZREM)        |   NO    |  Item never deleted; 30s lease expires -> 0 data loss retry. |    At-Least-Once (MAANG)
+
+
+
+
+
+
+[Redis] Phase 1 (100% Atomic via Lua)
+   │  ZRANGEBYSCORE + ZADD (now + 30s)
+   │  Item is leased and hidden from other sweepers.
+   ▼
+[JVM -> Kafka Broker] Network Phase
+   │  Publish to 'run' topic and wait for Broker ACK (.get(5, TimeUnit.SECONDS))
+   ▼
+[Redis] Phase 2 (Separate Command)
+      Kafka confirmed write -> redisTemplate.opsForZSet().remove(zsetKey, itemJson)
+      Item is permanently deleted from Redis.
+
+
+
+
+
+New flow : 
+
+
+                   [retry:delayed] (Redis ZSET)
+                          │
+  Step 1: Sweeper claims lease (Score set to now + 30s)
+  (Other sweepers/instances will ignore it for the next 30s)
+                          │
+                          ▼
+             Publish to Kafka 'run' topic
+                          │
+                   Wait for Broker ACK
+                          │
+            ┌─────────────┴─────────────┐
+            ▼                           ▼
+       [SUCCESS]                     [CRASH]
+  Step 2: ZREM from Redis       Service died before ACK.
+  (Item permanently deleted)    30s passes -> Item score becomes due again!
+                                Next sweeper instance automatically retries!
+
+
+Summary :
+You cannot make "Select from Redis + Delete from Redis + Publish to Kafka" atomic across two different distributed systems without a heavy two-phase commit coordinator.
+Therefore, the industry standard is what we have now: Atomic Lease (in Redis) -> Publish & Await ACK (in Kafka) ->  Delete (in Redis).
+
+with this we get at least once gurantee
+
+but what about at most once i.e. exactly once data flow, The Short Answer :
+
+True exactly-once delivery across two independent systems (Redis → Kafka) is mathematically impossible. This is a consequence of the Two Generals' Problem (https://en.wikipedia.org/wiki/Two_Generals%27_Problem). No protocol can guarantee that both "remove from Redis" and "publish to Kafka" succeed atomically without a shared transactional log.
+
+
+suppose to achieve this we can have a implmentation where the runID is created during the ingetion in the redis ZSET (currently the runID is genrated by retry-service right before dispatch to kafka 'run', so if the service goes down after fetching from redis, publishing to kafka and on kafka ack comes and right beofore deleting from the redis ZSET, after next 30 secs lease expire the new runmessage record for same retry data is genrated with new runID) and on dueTime = now, sending to kafka send with the same runID, this will ensure that for the same retry data from the retry topic gets exaclty one runID for the next attempt, but now the JCP will also need to have the lock on this ID using redis and before forwarding to the executor, check if the ID is already locked, but in job-consumer-service if we add Redis SETNX dispatch:lock:{runId} before Feign call, and if the same issue occur that service crashed before feign call we are back to same issue 
+
+so this is it 
