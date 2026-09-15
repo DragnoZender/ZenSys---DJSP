@@ -1027,3 +1027,96 @@ True exactly-once delivery across two independent systems (Redis → Kafka) is m
 suppose to achieve this we can have a implmentation where the runID is created during the ingetion in the redis ZSET (currently the runID is genrated by retry-service right before dispatch to kafka 'run', so if the service goes down after fetching from redis, publishing to kafka and on kafka ack comes and right beofore deleting from the redis ZSET, after next 30 secs lease expire the new runmessage record for same retry data is genrated with new runID) and on dueTime = now, sending to kafka send with the same runID, this will ensure that for the same retry data from the retry topic gets exaclty one runID for the next attempt, but now the JCP will also need to have the lock on this ID using redis and before forwarding to the executor, check if the ID is already locked, but in job-consumer-service if we add Redis SETNX dispatch:lock:{runId} before Feign call, and if the same issue occur that service crashed before feign call we are back to same issue 
 
 so this is it 
+
+
+Gap found - ingetion of Deduplicate key and ZSET item is not atomic
+
+Q. when the retry-service consumes from the kafka 'retry' and between storing Deduplication key and corresponding DelayedRetryItem, what if the service crashed ?
+
+No, the current simple implmenation of ingetion does not handle this issue 
+
+This is another classic distributed systems trap: Phantom Deduplication (also known as the Premature Lock anomaly).
+
+defination - Phantom Deduplication occurs when a system treats a job as successfully processed merely because a deduplication/lock marker was created, causing a legitimate retry to be incorrectly discarded after the original attempt fails or crashes. 
+
+
+The Problem : What Happens in That Failure Scenario :
+
+Let's trace the exact timeline of events if the service crashes between lines 47 and 70:
+
+
+1. Redis: SETNX retry:dedup:job-1:2 "1"  --> SUCCEEDS (Lock acquired in Redis)
+                ▼
+      [CRASH: Power Loss / SIGKILL / OOM]  <-- CRASH HAPPENS HERE
+                ▼
+
+2. Redis: ZADD retry:delayed <itemJson>  --> NEVER EXECUTED!
+
+3. Kafka Offset Commit                   --> NEVER HAPPENED!
+
+
+
+Now, the service restarts (or another consumer instance takes over the Kafka partition):
+
+        - Because the offset was never committed, Kafka redelivers the exact same message for Attempt 2.
+        - The consumer receives the message and runs Line 47:
+
+        in the code : 
+        Boolean isNew = redisTemplate.opsForValue().setIfAbsent(dedupKey, "1", ...);
+        --> What does Redis return? FALSE! Because the key was already set in Step 1 before the crash!
+
+        this results 
+        
+        ```
+        if (Boolean.FALSE.equals(isNew)) {
+            log.warn("Duplicate retry event detected and ignored...");
+            return; // <--- SKIPPED!
+        }
+        ```
+
+The disaster: The consumer falsely believes it already processed this message, drops it, and commits the Kafka offset. The item was never in retry:delayed, and the job is permanently lost!
+
+
+The Solution: Atomic Ingestion via Lua Script :- 
+
+=> In distributed systems, whenever you need to deduplicate AND queue an item, doing them as two separate network calls (SETNX then ZADD) will always leave a vulnerability window between the two commands.
+The MAANG standard is to execute both operations atomically inside a single Redis Lua script:
+
+```
+local dedup_key = KEYS[1]
+local zset_key = KEYS[2]
+
+local dedup_ttl = tonumber(ARGV[1])
+local due_timestamp = tonumber(ARGV[2])
+local item_json = ARGV[3]
+
+-- 1. Try to set the deduplication key atomically (SETNX with EX)
+local set_result = redis.call('SET', dedup_key, '1', 'EX', dedup_ttl, 'NX')
+
+if not set_result then
+    -- Key already exists -> True duplicate redelivery from Kafka
+    return 0
+end
+
+-- 2. New message -> Atomically add to delayed queue in the same transaction!
+redis.call('ZADD', zset_key, due_timestamp, item_json)
+return 1
+
+```
+
+
+Why This Completely Eliminates the Bug ?
+=> Because Redis executes Lua scripts atomically on a single thread:
+
+It is physically impossible for a crash to occur between the SET and the ZADD.
+
+Case 1: Crash before the Lua script runs: Neither the dedup key nor the ZSET item is in Redis. When Kafka redelivers, it is treated as new and processed normally.
+
+Case 2: Crash after the Lua script runs (before Kafka commits offset): Both the dedup key and the ZSET item already exist in Redis. When Kafka redelivers, the Lua script returns 0 (duplicate) and skips it. The item is already safely in retry:delayed waiting to be swept and executed!
+Bonus performance win: It cuts network latency in half (1 round-trip to Redis instead of 2).
+
+so this ensure that both key and item stored or none.
+
+
+
+next DLQ pipeline

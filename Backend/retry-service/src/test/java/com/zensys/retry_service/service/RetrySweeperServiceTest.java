@@ -30,113 +30,114 @@ import com.zensys.retry_service.kafka.RetryRunProducer;
 @ExtendWith(MockitoExtension.class)
 class RetrySweeperServiceTest {
 
-    @Mock
-    private StringRedisTemplate redisTemplate;
+        @Mock
+        private StringRedisTemplate redisTemplate;
 
-    @Mock
-    private ZSetOperations<String, String> zSetOperations;
+        @Mock
+        private ZSetOperations<String, String> zSetOperations;
 
-    @Mock
-    private RetryRunProducer runProducer;
+        @Mock
+        private RetryRunProducer runProducer;
 
-    private ObjectMapper objectMapper;
+        private ObjectMapper objectMapper;
 
-    @InjectMocks
-    private RetrySweeperService sweeperService;
+        @InjectMocks
+        private RetrySweeperService sweeperService;
 
-    @BeforeEach
-    void setUp() throws Exception {
-        objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
+        @BeforeEach
+        void setUp() throws Exception {
+                objectMapper = new ObjectMapper();
+                objectMapper.registerModule(new JavaTimeModule());
 
-        Field mapperField = RetrySweeperService.class.getDeclaredField("objectMapper");
-        mapperField.setAccessible(true);
-        mapperField.set(sweeperService, objectMapper);
+                Field mapperField = RetrySweeperService.class.getDeclaredField("objectMapper");
+                mapperField.setAccessible(true);
+                mapperField.set(sweeperService, objectMapper);
 
-        Field zsetKeyField = RetrySweeperService.class.getDeclaredField("zsetKey");
-        zsetKeyField.setAccessible(true);
-        zsetKeyField.set(sweeperService, "retry:delayed");
+                Field zsetKeyField = RetrySweeperService.class.getDeclaredField("zsetKey");
+                zsetKeyField.setAccessible(true);
+                zsetKeyField.set(sweeperService, "retry:delayed");
 
-        Field batchSizeField = RetrySweeperService.class.getDeclaredField("batchSize");
-        batchSizeField.setAccessible(true);
-        batchSizeField.set(sweeperService, 100);
+                Field batchSizeField = RetrySweeperService.class.getDeclaredField("batchSize");
+                batchSizeField.setAccessible(true);
+                batchSizeField.set(sweeperService, 100);
 
-        Field leaseField = RetrySweeperService.class.getDeclaredField("leaseDurationMs");
-        leaseField.setAccessible(true);
-        leaseField.set(sweeperService, 30000L);
+                Field leaseField = RetrySweeperService.class.getDeclaredField("leaseDurationMs");
+                leaseField.setAccessible(true);
+                leaseField.set(sweeperService, 30000L);
 
-        sweeperService.init();
-    }
+                sweeperService.init();
+        }
 
-    @Test
-    void testSweepDueRetries_EmptyList_NoPublish() {
-        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
-                .thenReturn(Collections.emptyList());
+        @Test
+        void testSweepDueRetries_EmptyList_NoPublish() {
+                when(redisTemplate.execute(any(DefaultRedisScript.class),
+                                eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
+                                .thenReturn(Collections.emptyList());
 
-        sweeperService.sweepDueRetries();
+                sweeperService.sweepDueRetries();
 
-        verify(runProducer, never()).publishToRunTopic(any());
-    }
+                verify(runProducer, never()).publishToRunTopic(any());
+        }
 
-    @Test
-    void testSweepDueRetries_HasDueItems_PublishesAndRemovesOnSuccess() throws Exception {
-        when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
+        @Test
+        void testSweepDueRetries_HasDueItems_PublishesAndRemovesOnSuccess() throws Exception {
+                when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
 
-        DelayedRetryItem item = DelayedRetryItem.builder()
-                .retryId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-                .originalRunId("01ARZ3NDEKTSV4RRFFQ69G5FAT")
-                .jobId("job-456")
-                .payload("{\"test\": true}")
-                .attempt(2)
-                .maxRetries(3)
-                .retryDelaySeconds(20L)
-                .dueTimestampMs(System.currentTimeMillis() - 1000)
-                .createdAt(Instant.now())
-                .build();
+                DelayedRetryItem item = DelayedRetryItem.builder()
+                                .retryId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                                .originalRunId("01ARZ3NDEKTSV4RRFFQ69G5FAT")
+                                .jobId("job-456")
+                                .payload("{\"test\": true}")
+                                .attempt(2)
+                                .maxRetries(3)
+                                .retryDelaySeconds(20L)
+                                .dueTimestampMs(System.currentTimeMillis() - 1000)
+                                .createdAt(Instant.now())
+                                .build();
 
-        String itemJson = objectMapper.writeValueAsString(item);
+                String itemJson = objectMapper.writeValueAsString(item);
 
-        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
-                .thenReturn(List.of(itemJson));
-        when(runProducer.publishToRunTopic(any())).thenReturn(true);
+                when(redisTemplate.execute(any(DefaultRedisScript.class),
+                                eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
+                                .thenReturn(List.of(itemJson));
+                when(runProducer.publishToRunTopic(any())).thenReturn(true);
 
-        sweeperService.sweepDueRetries();
+                sweeperService.sweepDueRetries();
 
-        verify(runProducer).publishToRunTopic(argThat(msg ->
-                msg.getJobId().equals("job-456") &&
-                msg.getAttempt().equals(2) &&
-                msg.getRunId() != null &&
-                !msg.getRunId().equals("01ARZ3NDEKTSV4RRFFQ69G5FAT")
-        ));
+                verify(runProducer).publishToRunTopic(argThat(msg -> msg.getJobId().equals("job-456") &&
+                                msg.getAttempt().equals(2) &&
+                                msg.getRunId() != null &&
+                                !msg.getRunId().equals("01ARZ3NDEKTSV4RRFFQ69G5FAT")));
 
-        // Verifies item is removed from Redis only after Kafka confirmation
-        verify(zSetOperations).remove("retry:delayed", itemJson);
-    }
+                // Verifies item is removed from Redis only after Kafka confirmation
+                verify(zSetOperations).remove("retry:delayed", itemJson);
+        }
 
-    @Test
-    void testSweepDueRetries_PublishFails_DoesNotRemoveFromRedis() throws Exception {
-        DelayedRetryItem item = DelayedRetryItem.builder()
-                .retryId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-                .originalRunId("01ARZ3NDEKTSV4RRFFQ69G5FAT")
-                .jobId("job-456")
-                .payload("{\"test\": true}")
-                .attempt(2)
-                .maxRetries(3)
-                .retryDelaySeconds(20L)
-                .dueTimestampMs(System.currentTimeMillis() - 1000)
-                .createdAt(Instant.now())
-                .build();
+        @Test
+        void testSweepDueRetries_PublishFails_DoesNotRemoveFromRedis() throws Exception {
+                DelayedRetryItem item = DelayedRetryItem.builder()
+                                .retryId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                                .originalRunId("01ARZ3NDEKTSV4RRFFQ69G5FAT")
+                                .jobId("job-456")
+                                .payload("{\"test\": true}")
+                                .attempt(2)
+                                .maxRetries(3)
+                                .retryDelaySeconds(20L)
+                                .dueTimestampMs(System.currentTimeMillis() - 1000)
+                                .createdAt(Instant.now())
+                                .build();
 
-        String itemJson = objectMapper.writeValueAsString(item);
+                String itemJson = objectMapper.writeValueAsString(item);
 
-        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
-                .thenReturn(List.of(itemJson));
-        when(runProducer.publishToRunTopic(any())).thenReturn(false);
+                when(redisTemplate.execute(any(DefaultRedisScript.class),
+                                eq(Collections.singletonList("retry:delayed")), any(), any(), any()))
+                                .thenReturn(List.of(itemJson));
+                when(runProducer.publishToRunTopic(any())).thenReturn(false);
 
-        sweeperService.sweepDueRetries();
+                sweeperService.sweepDueRetries();
 
-        verify(runProducer).publishToRunTopic(any());
-        // Must NOT remove from Redis so lease can expire and retry
-        verify(redisTemplate, never()).opsForZSet();
-    }
+                verify(runProducer).publishToRunTopic(any());
+                // Must NOT remove from Redis so lease can expire and retry
+                verify(redisTemplate, never()).opsForZSet();
+        }
 }

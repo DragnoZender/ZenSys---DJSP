@@ -1,16 +1,13 @@
 package com.zensys.retry_service.kafka;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
-import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,8 +16,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
-import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -31,12 +27,6 @@ class RetryEventConsumerTest {
 
     @Mock
     private StringRedisTemplate redisTemplate;
-
-    @Mock
-    private ValueOperations<String, String> valueOperations;
-
-    @Mock
-    private ZSetOperations<String, String> zSetOperations;
 
     private ObjectMapper objectMapper;
 
@@ -59,14 +49,17 @@ class RetryEventConsumerTest {
         Field ttlField = RetryEventConsumer.class.getDeclaredField("dedupTtlSeconds");
         ttlField.setAccessible(true);
         ttlField.set(retryEventConsumer, 600L);
+
+        retryEventConsumer.init();
     }
 
     @Test
-    void testConsume_NewEvent_SuccessfullyBuffered() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
-        when(valueOperations.setIfAbsent(eq("retry:dedup:job-123:2"), eq("1"), any(Duration.class)))
-                .thenReturn(Boolean.TRUE);
+    void testConsume_NewEvent_AtomicallyBuffered() {
+        when(redisTemplate.execute(
+                any(DefaultRedisScript.class),
+                eq(List.of("retry:dedup:job-123:2", "retry:delayed")),
+                any(), any(), any()
+        )).thenReturn(1L);
 
         JobRetryEvent event = JobRetryEvent.builder()
                 .runId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -81,14 +74,20 @@ class RetryEventConsumerTest {
 
         retryEventConsumer.consume(event);
 
-        verify(zSetOperations).add(eq("retry:delayed"), anyString(), anyDouble());
+        verify(redisTemplate).execute(
+                any(DefaultRedisScript.class),
+                eq(List.of("retry:dedup:job-123:2", "retry:delayed")),
+                any(), any(), any()
+        );
     }
 
     @Test
     void testConsume_DuplicateEvent_Dropped() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.setIfAbsent(eq("retry:dedup:job-123:2"), eq("1"), any(Duration.class)))
-                .thenReturn(Boolean.FALSE);
+        when(redisTemplate.execute(
+                any(DefaultRedisScript.class),
+                eq(List.of("retry:dedup:job-123:2", "retry:delayed")),
+                any(), any(), any()
+        )).thenReturn(0L);
 
         JobRetryEvent event = JobRetryEvent.builder()
                 .runId("01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -103,6 +102,10 @@ class RetryEventConsumerTest {
 
         retryEventConsumer.consume(event);
 
-        verify(redisTemplate, never()).opsForZSet();
+        verify(redisTemplate).execute(
+                any(DefaultRedisScript.class),
+                eq(List.of("retry:dedup:job-123:2", "retry:delayed")),
+                any(), any(), any()
+        );
     }
 }
