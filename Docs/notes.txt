@@ -1119,4 +1119,81 @@ so this ensure that both key and item stored or none.
 
 
 
-next DLQ pipeline
+Q. Does current implementation gurantee that the kafka offset is only committed when Deduplication and adding corresponding DelayedRetryItem is stored in the redis ?
+
+Yes, the current implementation guarantees that the Kafka offset is only committed after the deduplication and delayed item are stored in Redis.
+
+Here is the exact technical breakdown of why:
+
+There are 3 foundational mechanisms in Spring Boot + Spring Kafka at work:
+
+A. Spring Boot Disables Kafka Auto-Commit by Default :
+In raw Kafka, if enable.auto.commit = true, a background thread commits offsets every 5 seconds regardless of your code. In Spring Kafka, enable.auto.commit is set to false by default. Kafka never commits offsets on a timer in the background.
+
+
+B. Synchronous & Blocking Execution
+
+In RetryEventConsumer.java :
+
+```
+@KafkaListener(...)
+public void consume(JobRetryEvent event) {
+    ...
+    // 1. Synchronous blocking call to Redis
+    Long result = redisTemplate.execute(...);
+
+    // 2. Only if Redis succeeds does this method return normally
+}
+
+```
+
+redisTemplate.execute(...) is a blocking network call. The listener thread cannot exit consume() until Redis has completely finished the Lua transaction and returned the result to the JVM.
+
+also, because RetryEventConsumer.consume() is a synchronous Java method, it is impossible for Spring Kafka to acknowledge/commit the message before RetryEventConsumer.consume() has completely finished storing the item in Redis.
+
+
+
+
+C. Exception Aborts Offset Commit
+If Redis is down, times out, or throws any error:
+
+```
+
+catch (Exception e) {
+    throw new RuntimeException("Redis atomic buffering failed for retry item", e);
+}
+
+```
+
+When an unhandled exception bubbles out of @KafkaListener:
+        - Spring Kafka’s ListenerConsumer catches the exception.
+        - It explicitly refrains from committing the offset of that record.
+        - The record will remain uncommitted and will be re-polled / retried according to the error handler.
+
+
+
+
+
+*** The Nuance: Default AckMode.BATCH vs AckMode.RECORD ***
+
+By default, Spring Kafka uses AckMode.BATCH:
+
+If Kafka polls 5 retry messages in one poll:
+        - Message 1: Stored in Redis.
+        - Message 2: Stored in Redis.
+        - Pod crashes on Message 3.
+
+Because the entire batch didn't finish, offsets for Messages 1 & 2 might not have been flushed to Kafka yet.
+
+When the service restarts, Kafka redelivers Message 1.
+
+Is this a problem? 
+=> No! Because our Atomic Lua Ingestion script sees the key in Redis, returns 0 (duplicate), logs a warning, and safely skips it without adding it to the queue twice.
+
+
+
+next    1. DLQ pipeline
+        2. update consumer-service if needed
+        3. update watcher-service for heartbeat
+        4. impl api gateway
+        5. implment service discovery
