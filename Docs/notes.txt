@@ -1210,9 +1210,427 @@ Implemented the Persistance of the JobRunLifecycle Events in the job_run databas
 4. job_run comes with status FAILED/TIME_OUT, keep the corresponding job record status unchanged, as the job is going through the retry pipeline 
 
 
+if the atttempts exhaust i.e Dead job following is the story of implmenation for it :-
 
-next    1. DLQ pipeline
-        2. update consumer-service if needed
-        3. update watcher-service for heartbeat
-        4. impl api gateway
-        5. implment service discovery
+Now to implement the DLQ persistance, the plan was simple just consume the DeadLetterEvent and persist to the DB, but there is the major issue, as the consumer-service consumes from the dead letter topic as well as the job-run-events, there this issue can arrive that the dead letter of the job came first before the jobRunstatus lifecycle event record (like running or concluding failed/timeout) 
+
+=> In a distributed system, this cross-topic race condition can definitely happen.
+
+1. Why Can the Dead Letter Event Arrive Before the Lifecycle Event?
+
+Even though executor-service calls publishLifecycleEvent(failedEvent) immediately followed by publishDeadEvent(deadEvent), Kafka cannot guarantee cross-topic ordering:
+
+a. Different Topics & Partitions:
+        Message 1 goes to topic job-run-events.
+        Message 2 goes to topic dead.
+        Kafka only guarantees FIFO ordering within a single partition of the same topic. Across different topics, there is zero ordering guarantee.
+
+b. Independent Consumer Groups & Thread Pools:
+        In JobRunEventConsumer.java => consumeLifecycleEvent and consumeDeadEvent belong to two separate consumer groups (job-run-events-consumer-group vs job-dead-consumer-group) and run on separate listener threads.
+
+c. Traffic Volume Disparity : 
+        - job-run-events handles high volume (PENDING, RUNNING, SUCCESS, FAILED for every run attempt across all jobs).
+        - dead receives very low volume.
+        - If the job-run-events listener thread has even a slight lag, GC pause, or batch backlog, the idle job-dead listener thread can consume and commit the JobDeadEvent milliseconds before the lifecycle event is picked up.
+
+
+
+2. What Happens in the Code If JobDeadEvent Arrives First?
+
+If JobDeadEvent arrives first, the following occurs:
+
+[Timeline]
+T1: dead topic consumer receives JobDeadEvent
+    └── processDeadEvent() sets job.setStatus(FAILED_PERMANENTLY) in DB.
+    └── (JobRun record in DB is still in RUNNING or PENDING, or not created yet)
+
+T2: job-run-events consumer receives delayed RUNNING or FAILED event:
+        - Scenario A: A late RUNNING event arrives at T2 
+                - The Bug: It would overwrite FAILED_PERMANENTLY and resurrect the dead job back to RUNNING! (Major issue)
+        - Scenario B: The FAILED lifecycle event arrives at T2:
+                - The JobRun record updates to FAILED. In updateJobStatusOnTerminalRun, it retains job.getStatus() (which is already FAILED_PERMANENTLY), so job.status stays FAILED_PERMANENTLY. However, during the window between T1 and T2, the JobRun was out-of-sync with the parent Job. (no major issue)
+
+
+
+
+3. How to Make This 100% Order-Independent & Resilient ? 
+
+To eliminate this race condition regardless of which event arrives first, we implement two guards: 
+
+Guard 1: Terminal State Protection on the Job Entity (Layer 2 for Job)
+
+Just as we protect terminal JobRun statuses from regressing backward, we guard the parent Job:
+- If job.getStatus() is already in a terminal state (FAILED_PERMANENTLY, COMPLETED, or CANCELLED), no incoming lifecycle event (RUNNING, PENDING, SCHEDULED) is ever allowed to mutate job.status.
+- The run history in job_runs is still recorded/updated, but job.status remains permanently locked.
+
+```
+// Inside processLifecycleEvent method
+
+boolean isJobTerminal = job.getStatus() == JobStatus.FAILED_PERMANENTLY 
+        || job.getStatus() == JobStatus.COMPLETED 
+        || job.getStatus() == JobStatus.CANCELLED;
+
+if (!isJobTerminal) {
+    job.setStatus(JobStatus.RUNNING);
+    jobRepository.save(job);
+} else {
+    log.info("Job {} is in terminal status '{}'; ignoring RUNNING update", job.getId(), job.getStatus());
+}
+
+```
+
+
+Guard 2: Run Synchronization in processDeadEvent
+In processDeadEvent(), also check if a JobRun exists for event.getRunId(). If it exists and is not yet terminal, transition it to FAILED (terminal state):
+
+```
+// Inside processDeadEvent method
+
+if (event.getRunId() != null) {
+    jobRunRepository.findByRunId(event.getRunId()).ifPresent(run -> {
+        if (!run.getStatus().isTerminal()) {
+            run.setStatus(JobRunStatus.FAILED);
+            run.setErrorMsg(event.getErrorMsg());
+            run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
+            jobRunRepository.save(run);
+        }
+    });
+}
+
+```
+
+With these two guards in place:
+
+1. If JobDeadEvent arrives first -> Job is set to FAILED_PERMANENTLY and JobRun is marked FAILED. Any late RUNNING or PENDING events are safely ignored by Guard 1.
+
+2. If JobRunLifecycleEvent arrives first ->  normal flow, followed by processDeadEvent marking FAILED_PERMANENTLY.
+
+
+
+Now the next issue, 
+In the current flow suppose a job used all its attempts it goes to FAILED_PERMANATLY status even if it is CRON/INTERVAL job, well this is the ***circuit breaker *** philosphy so until n unless the user retrigers new CRON/ INTERVAL again, it is halt permanantly
+
+The Two Architectural Philosophies in Distributed Schedulers
+
+Philosophy A: Circuit Breaker / Fail-Safe Stop (Current Codebase)
+
+How it works: If all retries for an occurrence fail, the parent schedule is stopped permanently (FAILED_PERMANENTLY).
+
+Why systems use this:
+        - If a job fails because an external database is unreachable, credentials expired, or bad code was deployed, continuing to run every minute/hour will just flood Kafka with dead letters, hammer failing downstream systems, and waste compute.
+        - It acts as an automated Circuit Breaker: halt execution, alert the on-call engineer, and wait for manual fix + resume.
+
+
+Philosophy B: Resilient Recurring Schedule (Per-Occurrence Failure)
+
+How it works:
+        - The specific execution attempt is marked permanently failed in job_runs (JobRun.status = FAILED), and an alert is sent to the Dead Letter Queue.
+        - However, the parent Job is reset to SCHEDULED so tomorrow’s run (or the next interval) is still attempted.
+        - Only ScheduleType.ONCE jobs transition to FAILED_PERMANENTLY.
+
+Why systems use this (e.g., Kubernetes CronJob, Linux cron):
+        - The failure might be transient to that specific run's window (e.g., network blip or temporary 10-minute downstream outage).
+        - Permanently disabling the entire schedule can silently drop future runs unless someone actively monitors alerts.
+
+
+
+Since I building and scaling ZenSys to handle complex, enterprise workflows like Apache Airflow, Temporal, or Kubernetes, Philosophy B (Per-Occurrence Failure / Resilient Recurring Schedule) is overwhelmingly the best-suited architecture.
+
+Here is why:
+
+1. The Core Principle: Definition vs. Instance Separation
+
+In systems like Apache Airflow, Temporal, and Kubernetes:
+        - The Definition (Job / DAG) represents the standing contract or intent (e.g., "Run this pipeline every day at midnight").
+        - The Execution (JobRun / DagRun) represents a single instance in time (e.g., "Execution for Monday, Sept 16").
+
+A single JobRun failing an execution should never corrupt or kill the standing schedule contract.
+        - In Apache Airflow, if Monday’s DagRun fails all retries, Monday’s status becomes FAILED, but the DAG remains active (SCHEDULED). Tuesday’s run will trigger automatically.
+        - In Kubernetes CronJob, if a pod crashes and exhausts retries, that Job instance is marked FAILED, but the CronJob controller does not delete or stop future cron schedules.
+
+
+2. Resilience Against Transient External Failures
+
+In real-world distributed architectures:
+        - 90% of job failures are transient (e.g., an upstream microservice had a 15-minute outage, a third-party API returned 503, a database lock timed out, or daily batch files arrived 20 minutes late).
+        - If Monday’s 2 AM failure sets the Job to FAILED_PERMANENTLY:
+                - Tuesday, Wednesday, and Thursday will silently never run.
+                - On-call engineers would have to manually log in, inspect DBs, and un-pause/resurrect every single cron job after transient network blips.
+
+        With Philosophy B:
+                - Monday's run is recorded as FAILED in job_runs and dispatched to the DLQ (dead topic) for alerting (PagerDuty/Slack).
+                - The parent Job returns to SCHEDULED, and Tuesday's run attempts normally.
+
+
+
+JOB EXECUTION STATUS MATRIX
+===========================
+
+| Schedule Type | Attempt Result    | Dead Letter Event (dead topic) | Final Run Status (JobRun) | Final Job Status (Job) | Next Occurrence              |
+|---------------|-------------------|--------------------------------|---------------------------|------------------------|------------------------------|
+| ONCE          | SUCCESS           | N/A                            | SUCCESS                   | COMPLETED              | None (Done)                  |
+| ONCE          | Retries Exhausted | Emitted to DLQ                 | FAILED                    | FAILED_PERMANENTLY     | None (Done)                  |
+| CRON          | SUCCESS           | N/A                            | SUCCESS                   | SCHEDULED              | Triggers at nextRunTime      |
+| CRON          | Retries Exhausted | Emitted to DLQ                 | FAILED                    | SCHEDULED              | Triggers at nextRunTime      |
+| INTERVAL      | SUCCESS           | N/A                            | SUCCESS                   | SCHEDULED              | Triggers at nextRunTime      |
+| INTERVAL      | Retries Exhausted | Emitted to DLQ                 | FAILED                    | SCHEDULED              | Triggers at nextRunTime      |
+
+
+
+
+in code implemantion 
+In JobRunPersistenceService.java, processDeadEvent simply checks scheduleType:
+
+```
+@Transactional
+public void processDeadEvent(JobDeadEvent event) {
+    if (event.getJobId() == null) {
+        log.warn("Discarding malformed dead event missing jobId: {}", event);
+        return;
+    }
+
+    Job job = jobRepository.findById(event.getJobId()).orElse(null);
+    if (job != null) {
+        ScheduleType type = job.getScheduleType() != null ? job.getScheduleType() : ScheduleType.ONCE;
+        if (type == ScheduleType.ONCE) {
+            job.setStatus(JobStatus.FAILED_PERMANENTLY);
+            log.warn("Job {} is ScheduleType.ONCE; marked as FAILED_PERMANENTLY after exhausting all {} retries.",
+                    event.getJobId(), event.getMaxRetries());
+        } else {
+            // Recurring jobs (CRON, INTERVAL) remain active for future schedules
+            job.setStatus(JobStatus.SCHEDULED);
+            log.warn("Job {} is ScheduleType.{}; runId={} failed all {} retries, reset status to SCHEDULED for next run.",
+                    event.getJobId(), type, event.getRunId(), event.getMaxRetries());
+        }
+        jobRepository.save(job);
+    }
+
+    // Synchronize the failed JobRun record
+    if (event.getRunId() != null) {
+        jobRunRepository.findByRunId(event.getRunId()).ifPresent(run -> {
+            if (!run.getStatus().isTerminal()) {
+                run.setStatus(JobRunStatus.FAILED);
+                run.setErrorMsg(event.getErrorMsg());
+                run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
+                run.setModificationTime(Instant.now());
+                jobRunRepository.save(run);
+            }
+        });
+    }
+}
+
+```
+
+
+but since for dead-queue-consumer and JobRunEvent-consumer we implmented the guard (guard 1 and 2 as mentioned above) to avoid race condition between them, This philosophy B implementation cause issue to it or vice versa
+
+
+If under Philosophy B, processDeadEvent() resets a CRON job's status to SCHEDULED (so tomorrow's run can execute), then job.getStatus() is SCHEDULED. But SCHEDULED is not a terminal state! If a delayed RUNNING packet from the dead run arrives moments later, here !isJobInTerminalState(job) evaluate to true and resurrect the job to RUNNING !!!
+
+Why That Danger Exists in a Naive Implementation : 
+
+In previous code : 
+
+```
+// Inside processDeadEvent:
+if (event.getRunId() != null) {
+    jobRunRepository.findByRunId(event.getRunId()).ifPresent(run -> {
+        ...
+    });
+}
+```
+
+Notice .ifPresent(...)! If JobDeadEvent arrived so fast that the JobRun record had not even been created in the database yet (neither PENDING nor RUNNING had been saved yet):
+
+        1. processDeadEvent finds no JobRun, so it only sets job.status = SCHEDULED.
+        2. A delayed RUNNING event arrives for that run.
+        3. existingRunOpt.isPresent() is false.
+        4. It enters the else block (line 145), checks !isJobInTerminalState(job).
+        5. Since job.status == SCHEDULED, it's not terminal! It sets job.setStatus(JobStatus.RUNNING)!
+        6. The dead run resurrects the parent job into RUNNING permanently!
+
+
+How to Make Philosophy B 100% Race-Condition Proof ?
+
+The solution is simple and bulletproof: Tie the guard to the runId, not just the parent Job.
+
+1. In processDeadEvent: Upsert the JobRun as Terminal (FAILED)
+Instead of .ifPresent(...), we upsert (.orElseGet(...)) the JobRun in the database with status FAILED:
+
+```
+if (event.getRunId() != null) {
+    JobRun run = jobRunRepository.findByRunId(event.getRunId())
+            .orElseGet(() -> JobRun.builder()
+                    .runId(event.getRunId())
+                    .job(job)
+                    .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
+                    .build());
+
+    run.setStatus(JobRunStatus.FAILED);
+    run.setErrorMsg(event.getErrorMsg());
+    run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
+    run.setModificationTime(Instant.now());
+    jobRunRepository.save(run);
+}
+
+```
+
+2. How Layer 2 Rule 1 Protects the Job
+Now, when the delayed RUNNING (or PENDING) event arrives for that runId:
+
+        1. It queries jobRunRepository.findByRunId(event.getRunId()).
+        2. existingRunOpt.isPresent() is guaranteed to be true.
+        
+        3. It checks Rule 1 (JobRunPersistenceService.java):
+
+        ```
+        if (currentRun.getStatus().isTerminal()) {
+            log.info("Run runId='{}' is already finished with terminal status '{}'. Ignoring incoming '{}' event.",
+                    currentRun.getRunId(), currentRun.getStatus(), event.getStatus());
+            recordProcessedEvent(event.getEventId());
+            return; // <--- EXITS IMMEDIATELY!
+        }
+
+        ```
+        4. It exits immediately. It never evaluates the switch statement and never touches job.status.
+
+
+The End Result: Best of Both Worlds
+
+- For the Dead Run (runId_1): It is locked in job_runs as FAILED. Any late packets for runId_1 hit Rule 1 and are dropped.
+
+- For the Standing Schedule (Job):
+        -- If ScheduleType.ONCE -> job.status is set to FAILED_PERMANENTLY (and dual-guarded by isJobInTerminalState).
+        -- If ScheduleType.CRON / INTERVAL -> job.status resets to SCHEDULED ready for tomorrow's run (runId_2).
+
+- For Tomorrow's Run (runId_2): When tomorrow's scheduled time arrives, runId_2 starts as a brand-new run and transitions the job to RUNNING normally.
+
+- This eliminates the race condition completely while supporting the resilient Philosophy B Airflow-grade model.
+
+
+
+
+well below is the more simplified explanation --
+
+Step 1: The Setup (The Two Tables & Two Threads)
+In ZenSys, we have:
+        - jobs table (The parent job definition: e.g., Job "Daily-ETL", schedule CRON).
+        - job_runs table (A single execution instance: e.g., Run run-001, status PENDING, RUNNING, or FAILED).
+
+And inside consumer-service, we have two separate Kafka threads:
+        - Thread A (job-run-events topic): Receives RUNNING, SUCCESS, FAILED packets.
+        - Thread B (dead topic): Receives JobDeadEvent when all 3 retries are exhausted.
+
+
+Step 2: How the Race Condition Happens
+
+Suppose a CRON job reaches attempt 3 and fails:        
+        - The executor sends a RUNNING event to Kafka topic job-run-events (for Thread A).
+        - The executor then sends a JobDeadEvent to Kafka topic dead (for Thread B).
+
+Because Kafka topics are completely independent, Thread B can process the JobDeadEvent faster than Thread A processes the RUNNING event!
+
+--------------------------------------------------
+|Time 1: Thread B receives JobDeadEvent          | 
+|Time 2: Thread A receives delayed RUNNING event |
+--------------------------------------------------
+
+
+Step 3: Where the Problem Appears in "Philosophy B"
+
+Now look at what happens at Time 1 and Time 2:
+        
+        At Time 1 (Thread B runs processDeadEvent):
+                - In Philosophy B, for a CRON job, we want tomorrow’s run to still happen, so Thread B says:
+                        => "Attempt 3 died, but this is a CRON job, so I must keep the job ready for tomorrow!" -> job.setStatus(JobStatus.SCHEDULED)
+
+                At this exact moment:
+                - The Job status in the DB is SCHEDULED.
+                - But Thread A hasn't written anything to job_runs yet, so job_runs table has NO ROW for run-001!
+
+        At Time 2 (Thread A finally receives the delayed RUNNING event for run-001):
+                - Thread A wakes up and looks at the database:
+                        => Does run-001 exist in job_runs table? No! It's empty.
+                - Thread A thinks: "Aha! This is a brand-new run that just started!"
+
+                - Thread A checks if the parent Job is in a terminal state (isJobInTerminalState):
+                        => Is SCHEDULED a terminal state? NO! SCHEDULED means the job is alive!
+
+                - So Thread A executes this line
+                
+                ```
+                job.setStatus(JobStatus.RUNNING); // <--- DISASTER!
+                jobRepository.save(job);
+
+                ```
+
+The Disaster:
+- The job was supposed to stay SCHEDULED for tomorrow.
+- But Thread A's delayed packet overwrites it back to RUNNING!
+- And because all retries already died on Thread B, no more events are ever coming for this run!
+- The CRON job is now permanently frozen in RUNNING forever, and tomorrow’s run will never trigger!
+
+
+
+Step 4: Why Did This Happen?
+=> Because Thread B only updated the jobs table, but forgot to create the record in job_runs!
+and since because job_runs was empty, Thread A was tricked into thinking: "This is a new run that just started."
+
+
+Step 5: The Solution (How We Fix It Completely)
+
+=> The fix is one simple rule: When Thread B processes JobDeadEvent, it must immediately write run-001 into job_runs as FAILED.
+
+In code:
+
+```
+// If run-001 doesn't exist in job_runs yet, CREATE IT directly as FAILED!
+JobRun run = jobRunRepository.findByRunId(event.getRunId())
+        .orElseGet(() -> JobRun.builder()
+                .runId(event.getRunId())
+                .job(job)
+                .build());
+
+run.setStatus(JobRunStatus.FAILED);
+run.setErrorMsg(event.getErrorMsg());
+jobRunRepository.save(run);
+
+```
+
+
+Step 6: See How the Solution Stops the Race Condition
+        - Now, let's re-play the exact same race condition with the fix:
+
+
+        Time 1 (Thread B):
+                - Thread B sets job.status = SCHEDULED (ready for tomorrow).
+                - Thread B writes run-001 into job_runs table as FAILED.
+
+
+        Time 2 (Thread A receives the late RUNNING packet for run-001):        
+                - Thread A checks job_runs table: "Does run-001 exist?"
+                - Yes!
+                - What is its status? FAILED!
+                
+                - Our existing Rule 1 immediately triggers:
+                
+                ```
+                if (currentRun.getStatus().isTerminal()) {
+                    log.info("Run runId='{}' is already finished with terminal status '{}'. Ignoring incoming '{}' event.", ...);
+                    return; // <--- IT DROPS THE PACKET AND EXITS IMMEDIATELY!
+                }
+                
+                ```
+
+                - Thread A drops the packet and exits without touching job.status!
+                - The parent Job stays safely in SCHEDULED for tomorrow.
+
+By making processDeadEvent create the JobRun as FAILED (if it didn't exist yet), any late RUNNING packet hits the existing terminal guard on that run and is dropped immediately, so it can never corrupt the parent Job back to RUNNING.
+
+This eliminates the race condition completely while supporting the resilient Philosophy B Airflow-grade model.
+
+
+
+next    1. update watcher-service for heartbeat
+        2. implement api gateway
+        3. implment service discovery

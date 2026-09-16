@@ -206,26 +206,45 @@ public class JobRunPersistenceService {
 
         Job job = jobRepository.findById(event.getJobId()).orElse(null);
         if (job != null) {
-            job.setStatus(JobStatus.FAILED_PERMANENTLY);
+            ScheduleType scheduleType = job.getScheduleType() != null ? job.getScheduleType() : ScheduleType.ONCE;
+            if (scheduleType == ScheduleType.ONCE) {
+                job.setStatus(JobStatus.FAILED_PERMANENTLY);
+                log.warn(
+                        "Job {} is ScheduleType.ONCE; marked as FAILED_PERMANENTLY after exhausting all {} retries. Final error: '{}'",
+                        event.getJobId(), event.getMaxRetries(), event.getErrorMsg());
+            } else {
+                // Philosophy B (Resilient Recurring Schedulers like Airflow):
+                // Recurring jobs (CRON, INTERVAL) reset to SCHEDULED so future scheduled runs
+                // continue executing
+                job.setStatus(JobStatus.SCHEDULED);
+                log.warn(
+                        "Job {} is ScheduleType.{}; runId={} exhausted all {} retries, reset status to SCHEDULED for future runs. Final error: '{}'",
+                        event.getJobId(), scheduleType, event.getRunId(), event.getMaxRetries(), event.getErrorMsg());
+            }
             jobRepository.save(job);
-            log.warn("Job {} marked as FAILED_PERMANENTLY after exhausting all {} retries. Final error: '{}'",
-                    event.getJobId(), event.getMaxRetries(), event.getErrorMsg());
         } else {
             log.warn("Job not found for jobId={} while processing dead event", event.getJobId());
         }
 
-        // Guard: Synchronize corresponding JobRun if already persisted
+        // Guard: Synchronize or create corresponding JobRun as terminal FAILED
+        // This ensures late RUNNING/PENDING packets for this runId are caught by Rule 1
+        // and discarded
         if (event.getRunId() != null) {
-            jobRunRepository.findByRunId(event.getRunId()).ifPresent(run -> {
-                if (!run.getStatus().isTerminal()) {
-                    run.setStatus(JobRunStatus.FAILED);
-                    run.setErrorMsg(event.getErrorMsg());
-                    run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
-                    run.setModificationTime(Instant.now());
-                    jobRunRepository.save(run);
-                    log.info("Synchronized runId={} to FAILED from early JobDeadEvent", run.getRunId());
-                }
-            });
+            JobRun run = jobRunRepository.findByRunId(event.getRunId())
+                    .orElseGet(() -> JobRun.builder()
+                            .runId(event.getRunId())
+                            .job(job)
+                            .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
+                            .build());
+
+            if (run.getStatus() == null || !run.getStatus().isTerminal()) {
+                run.setStatus(JobRunStatus.FAILED);
+                run.setErrorMsg(event.getErrorMsg());
+                run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
+                run.setModificationTime(Instant.now());
+                jobRunRepository.save(run);
+                log.info("Synchronized/Created runId={} as FAILED from JobDeadEvent", run.getRunId());
+            }
         }
     }
 

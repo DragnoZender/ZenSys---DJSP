@@ -467,7 +467,7 @@ class JobRunPersistenceServiceTest {
     }
 
     @Test
-    void testProcessDeadEvent_SetsJobStatusToFailedPermanentlyAndSynchronizesRun() {
+    void testProcessDeadEvent_OnceJob_SetsJobStatusToFailedPermanentlyAndSynchronizesRun() {
         when(jobRepository.findById("job-001")).thenReturn(Optional.of(testJob));
         JobRun runningRun = JobRun.builder()
                 .runId("run-001")
@@ -495,6 +495,97 @@ class JobRunPersistenceServiceTest {
         verify(jobRunRepository).save(runningRun);
         assertThat(runningRun.getStatus()).isEqualTo(JobRunStatus.FAILED);
         assertThat(runningRun.getErrorMsg()).isEqualTo("Persistent error");
+    }
+
+    @Test
+    void testProcessDeadEvent_CronJob_ResetsJobStatusToScheduledPhilosophyB() {
+        Job cronJob = Job.builder()
+                .id("job-cron-dead")
+                .name("Cron Dead Job")
+                .scheduleType(ScheduleType.CRON)
+                .status(JobStatus.RUNNING)
+                .build();
+
+        when(jobRepository.findById("job-cron-dead")).thenReturn(Optional.of(cronJob));
+        when(jobRunRepository.findByRunId("run-cron-dead")).thenReturn(Optional.empty());
+
+        JobDeadEvent event = JobDeadEvent.builder()
+                .runId("run-cron-dead")
+                .jobId("job-cron-dead")
+                .attempt(3)
+                .maxRetries(3)
+                .errorMsg("Database timeout")
+                .timestamp(Instant.now())
+                .build();
+
+        persistenceService.processDeadEvent(event);
+
+        // Philosophy B: Recurring job resets to SCHEDULED so future occurrences can run
+        verify(jobRepository).save(cronJob);
+        assertThat(cronJob.getStatus()).isEqualTo(JobStatus.SCHEDULED);
+
+        // Upsert creates the JobRun with FAILED status
+        ArgumentCaptor<JobRun> captor = ArgumentCaptor.forClass(JobRun.class);
+        verify(jobRunRepository).save(captor.capture());
+        JobRun savedRun = captor.getValue();
+        assertThat(savedRun.getRunId()).isEqualTo("run-cron-dead");
+        assertThat(savedRun.getStatus()).isEqualTo(JobRunStatus.FAILED);
+        assertThat(savedRun.getErrorMsg()).isEqualTo("Database timeout");
+    }
+
+    @Test
+    void testRaceCondition_CronJob_DeadEventArrivesBeforeDelayedRunningEvent_JobRemainsScheduled() {
+        Job cronJob = Job.builder()
+                .id("job-cron-race")
+                .name("Cron Race Job")
+                .scheduleType(ScheduleType.CRON)
+                .status(JobStatus.RUNNING)
+                .build();
+
+        // 1. Dead event arrives FIRST and upserts JobRun as FAILED, resets cronJob to SCHEDULED
+        when(jobRepository.findById("job-cron-race")).thenReturn(Optional.of(cronJob));
+        when(jobRunRepository.findByRunId("run-cron-race")).thenReturn(Optional.empty());
+
+        JobDeadEvent deadEvent = JobDeadEvent.builder()
+                .runId("run-cron-race")
+                .jobId("job-cron-race")
+                .attempt(3)
+                .maxRetries(3)
+                .errorMsg("Fatal connection drop")
+                .timestamp(Instant.now())
+                .build();
+
+        persistenceService.processDeadEvent(deadEvent);
+
+        assertThat(cronJob.getStatus()).isEqualTo(JobStatus.SCHEDULED);
+
+        // Now mock that findByRunId returns the upserted FAILED run
+        JobRun deadRun = JobRun.builder()
+                .runId("run-cron-race")
+                .job(cronJob)
+                .status(JobRunStatus.FAILED)
+                .attemptNumber(3)
+                .errorMsg("Fatal connection drop")
+                .build();
+        when(jobRunRepository.findByRunId("run-cron-race")).thenReturn(Optional.of(deadRun));
+        when(processedEventRepository.existsById("evt-delayed-running")).thenReturn(false);
+
+        // 2. Delayed RUNNING event arrives for the dead run
+        JobRunLifecycleEvent delayedRunning = JobRunLifecycleEvent.builder()
+                .eventId("evt-delayed-running")
+                .runId("run-cron-race")
+                .jobId("job-cron-race")
+                .status(JobRunStatus.RUNNING)
+                .attempt(3)
+                .executorId("executor-8086")
+                .timestamp(Instant.now())
+                .build();
+
+        persistenceService.processLifecycleEvent(delayedRunning);
+
+        // Rule 1 intercepts the terminal FAILED run: cronJob MUST remain SCHEDULED, never resurrected to RUNNING!
+        assertThat(cronJob.getStatus()).isEqualTo(JobStatus.SCHEDULED);
+        assertThat(deadRun.getStatus()).isEqualTo(JobRunStatus.FAILED);
     }
 
     @Test
