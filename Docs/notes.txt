@@ -1192,6 +1192,25 @@ Is this a problem?
 
 
 
+
+
+Date - 16th September 2026
+
+
+Updating the consumer-service
+
+Since currently the consumer-service is the one to persist not only the job-commands but also JobRunLifecycle Events and the dead letters, we are going to implement it 
+
+
+Implemented the Persistance of the JobRunLifecycle Events in the job_run database, used the 2 layer idepontecy check as 1. Using eventID 2. Business logic forward flow check for job_run status, as planned on 9th sept, Also made sure that job status changes appropritately as follow :
+
+1. job_run comes with status PENDDING, keep corresponding Job record unchanged (i.e. SCHEUDDLED from watcher-service)
+2. job_run comes with status RUNNING, make corresponding Job record RUNNING.
+3. job_run comes with status SUCCESS, make corresponding Job record COMPLETED for ONCE or SCHEUDLED for ONCE/INTERVAL type
+4. job_run comes with status FAILED/TIME_OUT, keep the corresponding job record status unchanged, as the job is going through the retry pipeline 
+
+
+
 next    1. DLQ pipeline
         2. update consumer-service if needed
         3. update watcher-service for heartbeat

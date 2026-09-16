@@ -8,5 +8,10 @@ public enum JobRunStatus {
     FAILED,
     TIMEOUT,
     CANCELLED,
-    EXECUTOR_DIED
+    EXECUTOR_DIED;
+
+    public boolean isTerminal() {
+        return this == SUCCESS || this == FAILED || this == TIMEOUT
+                || this == CANCELLED || this == EXECUTOR_DIED;
+    }
 }

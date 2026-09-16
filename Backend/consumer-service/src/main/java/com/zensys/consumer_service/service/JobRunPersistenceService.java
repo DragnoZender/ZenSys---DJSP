@@ -12,8 +12,11 @@ import com.zensys.consumer_service.model.Job;
 import com.zensys.consumer_service.model.JobRun;
 import com.zensys.consumer_service.model.JobRunStatus;
 import com.zensys.consumer_service.model.JobStatus;
+import com.zensys.consumer_service.model.ProcessedEvent;
+import com.zensys.consumer_service.model.ScheduleType;
 import com.zensys.consumer_service.repository.JobRepository;
 import com.zensys.consumer_service.repository.JobRunRepository;
+import com.zensys.consumer_service.repository.ProcessedEventRepository;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -25,11 +28,22 @@ public class JobRunPersistenceService {
 
     private final JobRepository jobRepository;
     private final JobRunRepository jobRunRepository;
+    private final ProcessedEventRepository processedEventRepository;
 
     @Transactional
     public void processLifecycleEvent(JobRunLifecycleEvent event) {
         if (event.getRunId() == null || event.getJobId() == null) {
             log.warn("Discarding malformed lifecycle event missing runId or jobId: {}", event);
+            return;
+        }
+
+        // =========================================================================
+        // LAYER 1 IDEMPOTENCY: Exact Message Deduplication via eventId
+        // =========================================================================
+        if (event.getEventId() != null && processedEventRepository.existsById(event.getEventId())) {
+            log.info(
+                    "Lifecycle event with eventId='{}' (runId={}, status={}) has already been processed. Skipping duplicate.",
+                    event.getEventId(), event.getRunId(), event.getStatus());
             return;
         }
 
@@ -42,13 +56,135 @@ public class JobRunPersistenceService {
 
         Instant eventTime = event.getTimestamp() != null ? event.getTimestamp() : Instant.now();
 
-        switch (event.getStatus()) {
-            case PENDING -> handlePending(event, job, eventTime);
-            case RUNNING -> handleRunning(event, job, eventTime);
-            case SUCCESS -> handleSuccess(event, job, eventTime);
-            case FAILED, TIMEOUT -> handleFailureOrTimeout(event, job, eventTime);
-            default -> log.warn("Unhandled lifecycle status '{}' for runId={}", event.getStatus(), event.getRunId());
+        // =========================================================================
+        // LAYER 2 IDEMPOTENCY: State Machine Transition Guard (Out-of-Order Safety)
+        // =========================================================================
+        Optional<JobRun> existingRunOpt = jobRunRepository.findByRunId(event.getRunId());
+
+        if (existingRunOpt.isPresent()) {
+            JobRun currentRun = existingRunOpt.get();
+
+            // Rule 1: If current status is already in a terminal state (SUCCESS, FAILED,
+            // TIMEOUT, etc.),
+            // NEVER regress backward! Ignore incoming PENDING or RUNNING events.
+            if (currentRun.getStatus().isTerminal()) {
+                log.info("Run runId='{}' is already finished with terminal status '{}'. Ignoring incoming '{}' event.",
+                        currentRun.getRunId(), currentRun.getStatus(), event.getStatus());
+                recordProcessedEvent(event.getEventId());
+                return;
+            }
+
+            // Rule 2: If current status is RUNNING, ignore late PENDING or duplicate
+            // RUNNING.
+            if (currentRun.getStatus() == JobRunStatus.RUNNING) {
+                if (event.getStatus() == JobRunStatus.PENDING || event.getStatus() == JobRunStatus.RUNNING) {
+                    log.info("Run runId='{}' is already RUNNING. Ignoring incoming '{}' event.",
+                            currentRun.getRunId(), event.getStatus());
+                    recordProcessedEvent(event.getEventId());
+                    return;
+                }
+            }
+
+            // Apply forward transition
+            switch (event.getStatus()) {
+                case RUNNING -> {
+                    currentRun.setStatus(JobRunStatus.RUNNING);
+                    currentRun.setStartTime(eventTime);
+                    currentRun.setExecutorId(event.getExecutorId());
+                    currentRun.setModificationTime(Instant.now());
+                    jobRunRepository.save(currentRun);
+
+                    job.setStatus(JobStatus.RUNNING);
+                    jobRepository.save(job);
+                    log.info("Transitioned runId={} to RUNNING on executor={}", currentRun.getRunId(),
+                            event.getExecutorId());
+                }
+                case SUCCESS -> {
+                    currentRun.setStatus(JobRunStatus.SUCCESS);
+                    currentRun.setEndTime(eventTime);
+                    currentRun.setExecutionTimeMs(event.getExecutionTimeMs());
+                    currentRun.setModificationTime(Instant.now());
+                    jobRunRepository.save(currentRun);
+
+                    updateJobStatusOnTerminalRun(job, JobRunStatus.SUCCESS);
+                    log.info("Transitioned runId={} to SUCCESS (duration={}ms)", currentRun.getRunId(),
+                            event.getExecutionTimeMs());
+                }
+                case FAILED, TIMEOUT -> {
+                    currentRun.setStatus(event.getStatus());
+                    currentRun.setEndTime(eventTime);
+                    currentRun.setExecutionTimeMs(event.getExecutionTimeMs());
+                    currentRun.setErrorMsg(event.getErrorMsg());
+                    currentRun.setModificationTime(Instant.now());
+                    jobRunRepository.save(currentRun);
+
+                    updateJobStatusOnTerminalRun(job, event.getStatus());
+                    log.info("Transitioned runId={} to {} (error='{}')", currentRun.getRunId(), event.getStatus(),
+                            event.getErrorMsg());
+                }
+                default -> log.warn("Unhandled lifecycle status '{}' for existing runId={}", event.getStatus(),
+                        currentRun.getRunId());
+            }
+
+        } else {
+            // JobRun does not exist in DB yet (normal for PENDING, or out-of-order if
+            // RUNNING/SUCCESS arrives first)
+            switch (event.getStatus()) {
+                case PENDING -> {
+                    JobRun run = JobRun.builder()
+                            .runId(event.getRunId())
+                            .job(job)
+                            .status(JobRunStatus.PENDING)
+                            .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
+                            .modificationTime(eventTime)
+                            .build();
+                    jobRunRepository.save(run);
+                    log.info("Created PENDING run record: runId={}, jobId={}, attempt={}",
+                            event.getRunId(), event.getJobId(), event.getAttempt());
+                }
+                case RUNNING -> {
+                    // RUNNING arrived before PENDING
+                    JobRun run = JobRun.builder()
+                            .runId(event.getRunId())
+                            .job(job)
+                            .status(JobRunStatus.RUNNING)
+                            .startTime(eventTime)
+                            .executorId(event.getExecutorId())
+                            .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
+                            .modificationTime(Instant.now())
+                            .build();
+                    jobRunRepository.save(run);
+
+                    job.setStatus(JobStatus.RUNNING);
+                    jobRepository.save(job);
+                    log.info("Created RUNNING run record (arrived before PENDING): runId={}, executorId={}",
+                            event.getRunId(), event.getExecutorId());
+                }
+                case SUCCESS, FAILED, TIMEOUT -> {
+                    // Fast execution where terminal state arrived before PENDING or RUNNING
+                    JobRun run = JobRun.builder()
+                            .runId(event.getRunId())
+                            .job(job)
+                            .status(event.getStatus())
+                            .endTime(eventTime)
+                            .executionTimeMs(event.getExecutionTimeMs())
+                            .errorMsg(event.getErrorMsg())
+                            .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
+                            .modificationTime(Instant.now())
+                            .build();
+                    jobRunRepository.save(run);
+
+                    updateJobStatusOnTerminalRun(job, event.getStatus());
+                    log.info("Created {} run record (arrived out-of-order): runId={}, duration={}ms",
+                            event.getStatus(), event.getRunId(), event.getExecutionTimeMs());
+                }
+                default ->
+                    log.warn("Unhandled lifecycle status '{}' for new runId={}", event.getStatus(), event.getRunId());
+            }
         }
+
+        // Record eventId as processed (Layer 1)
+        recordProcessedEvent(event.getEventId());
     }
 
     @Transactional
@@ -69,87 +205,36 @@ public class JobRunPersistenceService {
         }
     }
 
-    private void handlePending(JobRunLifecycleEvent event, Job job, Instant eventTime) {
-        Optional<JobRun> existing = jobRunRepository.findByRunId(event.getRunId());
-        if (existing.isPresent()) {
-            log.info("JobRun runId={} already exists (status={}), skipping PENDING duplicate",
-                    event.getRunId(), existing.get().getStatus());
-            return;
-        }
-
-        JobRun run = JobRun.builder()
-                .runId(event.getRunId())
-                .job(job)
-                .status(JobRunStatus.PENDING)
-                .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
-                .modificationTime(eventTime)
-                .build();
-
-        jobRunRepository.save(run);
-        log.info("Created PENDING run record: runId={}, jobId={}, attempt={}",
-                event.getRunId(), event.getJobId(), event.getAttempt());
-    }
-
-    private void handleRunning(JobRunLifecycleEvent event, Job job, Instant eventTime) {
-        JobRun run = jobRunRepository.findByRunId(event.getRunId()).orElseGet(() -> {
-            log.info("JobRun runId={} not present on RUNNING event, creating it now", event.getRunId());
-            return JobRun.builder()
-                    .runId(event.getRunId())
-                    .job(job)
-                    .attemptNumber(event.getAttempt() != null ? event.getAttempt() : 1)
-                    .build();
-        });
-
-        run.setStatus(JobRunStatus.RUNNING);
-        run.setStartTime(eventTime);
-        run.setExecutorId(event.getExecutorId());
-        run.setModificationTime(Instant.now());
-        jobRunRepository.save(run);
-
-        job.setStatus(JobStatus.RUNNING);
-        jobRepository.save(job);
-
-        log.info("Updated JobRun to RUNNING: runId={}, executorId={}, job status set to RUNNING",
-                event.getRunId(), event.getExecutorId());
-    }
-
-    private void handleSuccess(JobRunLifecycleEvent event, Job job, Instant eventTime) {
-        JobRun run = jobRunRepository.findByRunId(event.getRunId()).orElse(null);
-        if (run != null) {
-            run.setStatus(JobRunStatus.SUCCESS);
-            run.setEndTime(eventTime);
-            run.setExecutionTimeMs(event.getExecutionTimeMs());
-            run.setModificationTime(Instant.now());
-            jobRunRepository.save(run);
+    private void updateJobStatusOnTerminalRun(Job job, JobRunStatus runStatus) {
+        ScheduleType scheduleType = job.getScheduleType() != null ? job.getScheduleType() : ScheduleType.ONCE;
+        if (runStatus == JobRunStatus.SUCCESS) {
+            if (scheduleType == ScheduleType.ONCE) {
+                job.setStatus(JobStatus.COMPLETED);
+                log.info("Job {} is ScheduleType.ONCE; transitioned status to COMPLETED", job.getId());
+            } else {
+                job.setStatus(JobStatus.SCHEDULED);
+                log.info("Job {} is ScheduleType.{}; reset status to SCHEDULED", job.getId(), scheduleType);
+            }
+            jobRepository.save(job);
         } else {
-            log.warn("JobRun runId={} not found when processing SUCCESS event", event.getRunId());
+            // On FAILED or TIMEOUT:
+            // All jobs (ONCE, CRON, INTERVAL) follow the retry pipeline.
+            // Retain RUNNING status to avoid false SCHEDULED flapping while retries are
+            // in-flight.
+            // If all retries exhaust, processDeadEvent() marks the job as
+            // FAILED_PERMANENTLY.
+            log.info("Job {} is ScheduleType.{}; retaining status {} during failure/retry",
+                    job.getId(), scheduleType, job.getStatus());
         }
-
-        job.setStatus(JobStatus.SCHEDULED);
-        jobRepository.save(job);
-
-        log.info("Updated JobRun to SUCCESS: runId={}, duration={}ms, job status reset to SCHEDULED",
-                event.getRunId(), event.getExecutionTimeMs());
     }
 
-    private void handleFailureOrTimeout(JobRunLifecycleEvent event, Job job, Instant eventTime) {
-        JobRun run = jobRunRepository.findByRunId(event.getRunId()).orElse(null);
-        if (run != null) {
-            run.setStatus(event.getStatus());
-            run.setEndTime(eventTime);
-            run.setExecutionTimeMs(event.getExecutionTimeMs());
-            run.setErrorMsg(event.getErrorMsg());
-            run.setModificationTime(Instant.now());
-            jobRunRepository.save(run);
-        } else {
-            log.warn("JobRun runId={} not found when processing {} event", event.getRunId(), event.getStatus());
+    private void recordProcessedEvent(String eventId) {
+        if (eventId != null && !eventId.isBlank()) {
+            processedEventRepository.save(
+                    ProcessedEvent.builder()
+                            .eventId(eventId)
+                            .processedAt(Instant.now())
+                            .build());
         }
-
-        // Job status returns to SCHEDULED so retry or next recurrence can pick it up
-        job.setStatus(JobStatus.SCHEDULED);
-        jobRepository.save(job);
-
-        log.info("Updated JobRun to {}: runId={}, duration={}ms, error='{}'",
-                event.getStatus(), event.getRunId(), event.getExecutionTimeMs(), event.getErrorMsg());
     }
 }
