@@ -94,10 +94,15 @@ public class JobRunPersistenceService {
                     currentRun.setModificationTime(Instant.now());
                     jobRunRepository.save(currentRun);
 
-                    job.setStatus(JobStatus.RUNNING);
-                    jobRepository.save(job);
-                    log.info("Transitioned runId={} to RUNNING on executor={}", currentRun.getRunId(),
-                            event.getExecutorId());
+                    if (!isJobInTerminalState(job)) {
+                        job.setStatus(JobStatus.RUNNING);
+                        jobRepository.save(job);
+                        log.info("Transitioned runId={} to RUNNING on executor={}", currentRun.getRunId(),
+                                event.getExecutorId());
+                    } else {
+                        log.info("Job {} is in terminal status '{}'; ignoring RUNNING status transition",
+                                job.getId(), job.getStatus());
+                    }
                 }
                 case SUCCESS -> {
                     currentRun.setStatus(JobRunStatus.SUCCESS);
@@ -155,10 +160,15 @@ public class JobRunPersistenceService {
                             .build();
                     jobRunRepository.save(run);
 
-                    job.setStatus(JobStatus.RUNNING);
-                    jobRepository.save(job);
-                    log.info("Created RUNNING run record (arrived before PENDING): runId={}, executorId={}",
-                            event.getRunId(), event.getExecutorId());
+                    if (!isJobInTerminalState(job)) {
+                        job.setStatus(JobStatus.RUNNING);
+                        jobRepository.save(job);
+                        log.info("Created RUNNING run record (arrived before PENDING): runId={}, executorId={}",
+                                event.getRunId(), event.getExecutorId());
+                    } else {
+                        log.info("Job {} is in terminal status '{}'; ignoring RUNNING status transition for runId={}",
+                                job.getId(), job.getStatus(), event.getRunId());
+                    }
                 }
                 case SUCCESS, FAILED, TIMEOUT -> {
                     // Fast execution where terminal state arrived before PENDING or RUNNING
@@ -203,9 +213,29 @@ public class JobRunPersistenceService {
         } else {
             log.warn("Job not found for jobId={} while processing dead event", event.getJobId());
         }
+
+        // Guard: Synchronize corresponding JobRun if already persisted
+        if (event.getRunId() != null) {
+            jobRunRepository.findByRunId(event.getRunId()).ifPresent(run -> {
+                if (!run.getStatus().isTerminal()) {
+                    run.setStatus(JobRunStatus.FAILED);
+                    run.setErrorMsg(event.getErrorMsg());
+                    run.setEndTime(event.getTimestamp() != null ? event.getTimestamp() : Instant.now());
+                    run.setModificationTime(Instant.now());
+                    jobRunRepository.save(run);
+                    log.info("Synchronized runId={} to FAILED from early JobDeadEvent", run.getRunId());
+                }
+            });
+        }
     }
 
     private void updateJobStatusOnTerminalRun(Job job, JobRunStatus runStatus) {
+        if (isJobInTerminalState(job)) {
+            log.info("Job {} is already in terminal status '{}'; ignoring terminal update from runStatus={}",
+                    job.getId(), job.getStatus(), runStatus);
+            return;
+        }
+
         ScheduleType scheduleType = job.getScheduleType() != null ? job.getScheduleType() : ScheduleType.ONCE;
         if (runStatus == JobRunStatus.SUCCESS) {
             if (scheduleType == ScheduleType.ONCE) {
@@ -226,6 +256,15 @@ public class JobRunPersistenceService {
             log.info("Job {} is ScheduleType.{}; retaining status {} during failure/retry",
                     job.getId(), scheduleType, job.getStatus());
         }
+    }
+
+    private boolean isJobInTerminalState(Job job) {
+        if (job.getStatus() == null) {
+            return false;
+        }
+        return job.getStatus() == JobStatus.FAILED_PERMANENTLY
+                || job.getStatus() == JobStatus.COMPLETED
+                || job.getStatus() == JobStatus.CANCELLED;
     }
 
     private void recordProcessedEvent(String eventId) {

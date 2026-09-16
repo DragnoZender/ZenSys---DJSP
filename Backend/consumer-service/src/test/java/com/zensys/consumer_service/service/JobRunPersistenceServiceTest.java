@@ -467,8 +467,15 @@ class JobRunPersistenceServiceTest {
     }
 
     @Test
-    void testProcessDeadEvent_SetsJobStatusToFailedPermanently() {
+    void testProcessDeadEvent_SetsJobStatusToFailedPermanentlyAndSynchronizesRun() {
         when(jobRepository.findById("job-001")).thenReturn(Optional.of(testJob));
+        JobRun runningRun = JobRun.builder()
+                .runId("run-001")
+                .job(testJob)
+                .status(JobRunStatus.RUNNING)
+                .attemptNumber(3)
+                .build();
+        when(jobRunRepository.findByRunId("run-001")).thenReturn(Optional.of(runningRun));
 
         JobDeadEvent event = JobDeadEvent.builder()
                 .runId("run-001")
@@ -482,6 +489,74 @@ class JobRunPersistenceServiceTest {
         persistenceService.processDeadEvent(event);
 
         verify(jobRepository).save(testJob);
+        assertThat(testJob.getStatus()).isEqualTo(JobStatus.FAILED_PERMANENTLY);
+
+        // Verify running run was synchronized to FAILED
+        verify(jobRunRepository).save(runningRun);
+        assertThat(runningRun.getStatus()).isEqualTo(JobRunStatus.FAILED);
+        assertThat(runningRun.getErrorMsg()).isEqualTo("Persistent error");
+    }
+
+    @Test
+    void testRaceCondition_DeadEventArrivesBeforeDelayedRunningEvent_JobRemainsFailedPermanently() {
+        testJob.setStatus(JobStatus.FAILED_PERMANENTLY);
+
+        when(processedEventRepository.existsById("evt-late-running")).thenReturn(false);
+        when(jobRepository.findById("job-001")).thenReturn(Optional.of(testJob));
+
+        JobRun failedRun = JobRun.builder()
+                .runId("run-001")
+                .job(testJob)
+                .status(JobRunStatus.FAILED)
+                .attemptNumber(3)
+                .errorMsg("Persistent error")
+                .build();
+        when(jobRunRepository.findByRunId("run-001")).thenReturn(Optional.of(failedRun));
+
+        // Delayed RUNNING event arrives after Dead event was already processed
+        JobRunLifecycleEvent lateRunningEvent = JobRunLifecycleEvent.builder()
+                .eventId("evt-late-running")
+                .runId("run-001")
+                .jobId("job-001")
+                .status(JobRunStatus.RUNNING)
+                .attempt(3)
+                .executorId("executor-8086")
+                .timestamp(Instant.now())
+                .build();
+
+        persistenceService.processLifecycleEvent(lateRunningEvent);
+
+        // Terminal state protection: Job must remain FAILED_PERMANENTLY and run must remain FAILED
+        assertThat(testJob.getStatus()).isEqualTo(JobStatus.FAILED_PERMANENTLY);
+        assertThat(failedRun.getStatus()).isEqualTo(JobRunStatus.FAILED);
+    }
+
+    @Test
+    void testRaceCondition_DeadEventArrivesBeforeNewRunLifecycle_JobStatusNotOverwritten() {
+        testJob.setStatus(JobStatus.FAILED_PERMANENTLY);
+
+        when(processedEventRepository.existsById("evt-new-running")).thenReturn(false);
+        when(jobRepository.findById("job-001")).thenReturn(Optional.of(testJob));
+        when(jobRunRepository.findByRunId("run-new")).thenReturn(Optional.empty());
+
+        JobRunLifecycleEvent newRunningEvent = JobRunLifecycleEvent.builder()
+                .eventId("evt-new-running")
+                .runId("run-new")
+                .jobId("job-001")
+                .status(JobRunStatus.RUNNING)
+                .attempt(1)
+                .executorId("executor-8086")
+                .timestamp(Instant.now())
+                .build();
+
+        persistenceService.processLifecycleEvent(newRunningEvent);
+
+        // JobRun is created for audit history
+        ArgumentCaptor<JobRun> captor = ArgumentCaptor.forClass(JobRun.class);
+        verify(jobRunRepository).save(captor.capture());
+        assertThat(captor.getValue().getStatus()).isEqualTo(JobRunStatus.RUNNING);
+
+        // But parent Job status must NEVER revert from FAILED_PERMANENTLY to RUNNING!
         assertThat(testJob.getStatus()).isEqualTo(JobStatus.FAILED_PERMANENTLY);
     }
 }
