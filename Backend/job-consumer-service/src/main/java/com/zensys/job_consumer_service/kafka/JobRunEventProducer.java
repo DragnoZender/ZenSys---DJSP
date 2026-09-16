@@ -27,13 +27,14 @@ public class JobRunEventProducer {
                 runEventsTopic,
                 event.getRunId(), // Partition key for FIFO ordering
                 event
-        ).whenComplete((result, ex) -> {
-            if (ex != null) {
-                log.error("Failed to publish lifecycle event for runId={}: {}", event.getRunId(), ex.getMessage(), ex);
-            } else {
-                log.debug("Successfully published lifecycle event for runId={} to partition={}",
-                        event.getRunId(), result.getRecordMetadata().partition());
-            }
-        });
+            ).whenComplete((result, ex) -> {
+                    if (ex != null) {
+                        log.error("Failed to publish lifecycle event for runId={}: {}", event.getRunId(),
+                                ex.getMessage(), ex);
+                    } else {
+                        log.debug("Successfully published lifecycle event for runId={} to partition={}",
+                                event.getRunId(), result.getRecordMetadata().partition());
+                    }
+                });
     }
 }

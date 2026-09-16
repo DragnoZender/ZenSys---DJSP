@@ -23,15 +23,13 @@ public class JobRunConsumer {
     private final JobRunEventProducer eventProducer;
     private final ExecutorClient executorClient;
 
-    @KafkaListener(
-            topics = "${job.run-topic:run}",
-            groupId = "${spring.kafka.consumer.group-id:job-consumer-service-group}"
-    )
+    @KafkaListener(topics = "${job.run-topic:run}", groupId = "${spring.kafka.consumer.group-id:job-consumer-service-group}")
     public void consume(JobRunMessage message) {
         log.info("Received job execution message from 'run' topic: runId={}, jobId={}, attempt={}",
                 message.getRunId(), message.getJobId(), message.getAttempt());
 
-        // 1. Emit PENDING lifecycle event so consumer-service creates the job_runs record
+        // 1. Emit PENDING lifecycle event so consumer-service creates the job_runs
+        // record
         JobRunLifecycleEvent pendingEvent = JobRunLifecycleEvent.builder()
                 .eventId(UlidCreator.getUlid().toString())
                 .runId(message.getRunId())
@@ -59,7 +57,8 @@ public class JobRunConsumer {
             log.info("Successfully dispatched runId={} to executor-service", message.getRunId());
         } catch (Exception e) {
             log.warn("Failed to dispatch runId={} to executor-service: {}", message.getRunId(), e.getMessage());
-            // Note: Once retry-service/DLQ is configured, dispatch failures can be routed to the 'retry' topic
+            // Note: Once retry-service/DLQ is configured, dispatch failures can be routed
+            // to the 'retry' topic
         }
     }
 }

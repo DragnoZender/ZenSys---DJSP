@@ -66,7 +66,8 @@ public class RetryEventConsumer {
         long delaySeconds = event.getRetryDelaySeconds() != null ? event.getRetryDelaySeconds() : 10L;
         long dueTimestampMs = System.currentTimeMillis() + (delaySeconds * 1000L);
 
-        // Dynamic TTL: ensures dedup key survives the entire delay duration + 300s buffer (min dedupTtlSeconds)
+        // Dynamic TTL: ensures dedup key survives the entire delay duration + 300s
+        // buffer (min dedupTtlSeconds)
         long effectiveDedupTtl = Math.max(dedupTtlSeconds, delaySeconds + 300L);
         String dedupKey = "retry:dedup:" + event.getJobId() + ":" + event.getAttempt();
 
@@ -86,14 +87,14 @@ public class RetryEventConsumer {
         try {
             String itemJson = objectMapper.writeValueAsString(item);
 
-            // 3. Atomically check deduplication AND buffer to ZSET in a single Lua transaction
+            // 3. Atomically check deduplication AND buffer to ZSET in a single Lua
+            // transaction
             Long result = redisTemplate.execute(
                     ingestScript,
                     List.of(dedupKey, zsetKey),
                     String.valueOf(effectiveDedupTtl),
                     String.valueOf(dueTimestampMs),
-                    itemJson
-            );
+                    itemJson);
 
             if (Long.valueOf(0).equals(result)) {
                 log.warn("Duplicate retry event detected and ignored for jobId={}, attempt={}",
@@ -101,7 +102,8 @@ public class RetryEventConsumer {
                 return;
             }
 
-            log.info("Atomically buffered retry item to Redis ZSET '{}': retryId={}, jobId={}, attempt={}, delay={}s, dueMs={}",
+            log.info(
+                    "Atomically buffered retry item to Redis ZSET '{}': retryId={}, jobId={}, attempt={}, delay={}s, dueMs={}",
                     zsetKey, item.getRetryId(), item.getJobId(), item.getAttempt(), delaySeconds, dueTimestampMs);
         } catch (Exception e) {
             log.error("Failed to buffer retry item to Redis for jobId={}, runId={}: {}",

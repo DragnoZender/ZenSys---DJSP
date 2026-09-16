@@ -16,7 +16,8 @@ public class JobConsumer {
 
     @KafkaListener(
             topics = "job-commands",
-            groupId = "job-consumer-group"
+            groupId = "job-consumer-group",
+            containerFactory = "jobCommandListenerContainerFactory"
     )
     public void consume(JobCommand command) {
 

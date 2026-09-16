@@ -25,6 +25,7 @@ import jakarta.persistence.ManyToOne;
         indexes = {
                 @Index(name = "idx_job_id", columnList = "job_id"),
                 @Index(name = "idx_status", columnList = "status"),
+                @Index(name = "idx_run_id", columnList = "run_id"),
                 @Index(name = "idx_modification_time", columnList = "modification_time"),
                 @Index(
                         name = "idx_status_modification_time",
@@ -41,6 +42,9 @@ public class JobRun {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
+
+    @Column(name = "run_id", length = 26, unique = true)
+    private String runId;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "job_id", nullable = false)
@@ -65,6 +69,9 @@ public class JobRun {
     @Builder.Default
     @Column(name = "attempt_number", nullable = false)
     private Integer attemptNumber = 1;
+
+    @Column(name = "execution_time_ms")
+    private Long executionTimeMs;
 
     @Column(name = "error_msg", columnDefinition = "TEXT")
     private String errorMsg;
