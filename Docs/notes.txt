@@ -1634,3 +1634,76 @@ This eliminates the race condition completely while supporting the resilient Phi
 next    1. update watcher-service for heartbeat
         2. implement api gateway
         3. implment service discovery
+
+
+
+
+
+Date - 17th September 2026
+
+In the consumer-service for the job commands persistance i had a doubt : 'JobConsumer.java' here in this code as the consume() methods makes call to the processJobCommand() method, then my doubt is when does the offset is commited to kafka instantly or once the processJobCommand() executes completely
+
+=> The offset is committed AFTER processJobCommand() executes completely and returns successfully. It is NOT committed instantly when the message arrives.
+
+Step-by-Step Execution Flow
+
+Here is the exact lifecycle of a message arriving at JobConsumer.java:
+
+
+Kafka Broker
+     │
+     ▼ (1) poll() fetches message
+Spring Kafka Listener Container
+     │
+     ▼ (2) Invokes listener method
+JobConsumer.consume(command)
+     │
+     ▼ (3) Calls business & DB logic
+JobPersistenceService.processJobCommand(command)
+     │   ├── Checks processed_commands for eventId
+     │   ├── Persists job in PostgreSQL (@Transactional)
+     │   └── Saves eventId in processed_commands
+     │
+     ▼ (4) Method completes successfully
+Spring Kafka Listener Container
+     │
+     ▼ (5) Commits offset to Kafka broker (__consumer_offsets)
+Kafka Broker
+
+
+
+
+Key Scenarios
+
+Scenario 1: Normal Successful Execution
+
+        1. consume(command) is called.
+        2. processJobCommand(command) finishes writing to PostgreSQL and commits the database transaction.
+        3. Control returns cleanly to Spring Kafka's listener container.
+        3. Spring Kafka commits the offset to Kafka. The broker now knows this message has been successfully processed.
+
+Scenario 2: Exception Thrown During processJobCommand()
+        1. If PostgreSQL is down, or a DB constraint fails, an exception is thrown out of processJobCommand().
+        2. The database transaction rolls back.
+        3. Spring Kafka intercepts the exception.
+        4. The offset is NOT committed to Kafka.
+        5. Depending on error handling / retry configuration, Spring Kafka will retry the message or redeliver it on the next poll cycle.
+
+
+Scenario 3: Service Crashes Mid-Execution
+        1. The service is in the middle of executing processJobCommand(), or crashes immediately after writing to the database before the network call to commit the offset to Kafka completes.
+        2. Because the offset was never committed to Kafka, when the service restarts, Kafka will redeliver the exact same message (At-Least-Once Delivery).
+        3. When the redelivered message reaches processJobCommand():
+        ```
+        if (processedCommandRepository.existsById(command.getEventId())) {
+                return; // Ensuring Idempotency
+        }
+
+        ```
+        The idempotency check in JobPersistenceService.java detects that eventId was already processed, skips duplicate execution, and control returns cleanly so Spring Kafka can now successfully commit the offset!
+
+How Spring Kafka Controls This :- 
+Under the hood in KafkaConsumerConfig.java: => 
+- By default, Spring Kafka disables raw Kafka's client-side periodic auto-commit (enable.auto.commit = false).
+- Instead, Spring's ConcurrentKafkaListenerContainerFactory manages offset commits using its ContainerProperties.AckMode (default is AckMode.BATCH).
+- In this mode, the container only commits the offset to the broker after the listener method has returned without throwing an unhandled exception.
