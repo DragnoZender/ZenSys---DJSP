@@ -504,7 +504,7 @@ Step 4: Watcher Recovers the Abandoned Jobs
 
 
 
-Why this is so superior to the Kafka $\rightarrow$ Postgres approach:
+Why this is so superior to the Kafka -> Postgres approach:
 
 1. Zero Database Churn: PostgreSQL is not burdened with hundreds of useless UPDATE queries every few seconds.
 2. Instant & Automatic: You don't write complex cleanup logic for dead workers—Redis's TTL does the deletion for free.

@@ -84,6 +84,10 @@ public class JobWatcherService {
                         job.getName(), job.getId(), runId, job.getNextRunTime());
             } catch (Exception e) {
                 log.error("Failed to dispatch due job '{}' (id={}): {}", job.getName(), job.getId(), e.getMessage(), e);
+                if (Thread.currentThread().isInterrupted()) {
+                    log.warn("Watcher polling thread interrupted. Stopping batch dispatch.");
+                    break;
+                }
             }
         }
     }
