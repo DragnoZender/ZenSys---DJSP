@@ -1631,12 +1631,6 @@ This eliminates the race condition completely while supporting the resilient Phi
 
 
 
-next    1. update watcher-service for heartbeat
-        2. implement api gateway
-        3. implment service discovery
-
-
-
 
 
 Date - 17th September 2026
@@ -2000,4 +1994,227 @@ Vulnerability 1: 100% Fixed
 Vulnerability 2: 100% Fixed
 Vulnerability 3: Optimized to At-Least-Once resilience (5,000x risk reduction; zero data loss)
 Vulnerability 4: 100% Fixed
-                
+        
+
+
+Now, Updating Wactcher-Service for heartbeat
+
+To have the Watcher-service act as job recoverer so that if any instance get stucked in running state by the dying executor. We already planned it on 9th sept, 
+
+So we will implement another 20 sec scheudled flow in the watcher-service that checks the DB for job_runs entries with status = running and their modifcation is more than 30 secs from no, once extracted this list the watcher then checks if their executor is alive by checking its heartbeat in redis, if not the watcher immidiatly marks lock on those run entry send lock to redis so no other instance of watcher-service try to recover it (saying others as "i saw the issue, handling it you can skip this one"), then just like the executor in normal flow sends the terminal status to JobRunEvent topic and the Retry/DLQ topic, 
+
+In this scenario the Watcher acts as a "Surrogate Executor"
+
+To understand why this is so clean, look at what a healthy executor normally does when a job fails:
+
+Under Normal Failure (Executor is Alive):
+
+In JobExecutionService.java:
+
+```
+// 1. Executor informs consumer-service to record the failure in PostgreSQL
+eventProducer.publishLifecycleEvent(failedEvent); // -> topic: job-run-events {Message-1}
+
+// 2. Executor directly requests the retry buffer
+eventProducer.publishRetryEvent(retryEvent);       // -> topic: retry {Message-2}
+
+```
+
+
+Under Crash Failure (Executor Dies Mid-Job):
+Because the executor was killed, it couldn't send Message 1 OR Message 2. Therefore, the watcher-service simply steps in as the "Surrogate Executor" and publishes the exact two messages the dead executor failed to send:
+
+
+                          [Executor Crashes Mid-Job]
+                                      │
+                               (Heartbeat Lost)
+                                      │
+                                      ▼
+                           [watcher-service]
+                   (Acts as the Surrogate Executor)
+                                      │
+             ┌────────────────────────┴────────────────────────┐
+             ▼ (Key: runId)                                     ▼ (Key: jobId)
+   [Kafka: job-run-events]                               [Kafka: retry topic]
+             │                                                  │
+             ▼                                                  ▼
+    [consumer-service]                                   [retry-service]
+   (Single DB Writer)                              (Durable Delay Buffer)
+  Writes EXECUTOR_DIED to DB                     Holds for 20s backoff -> Kafka run
+
+
+And since the executor died is the terminal state for that perticular job_run entity, so when the consumer, recives this message from the watcher-service via JobRunEvent topic, it sees its the terminal state and handles it accordingly considering the flow with guard and rules as applied on 16th sept
+
+
+This does not cause data inconsistancy at all since the JobRunEvent topic is partitioned based on runID so the executor-died state will always the last to be in the queue 
+
+
+
+Below is the complete mecnahism behind implemantation
+
+1. The Core Problem: Silent Zombie Runs
+
+        When an executor picks up a job from Kafka, it updates the job_run record in PostgreSQL to RUNNING.
+
+                - If the executor machine loses power, crashes due to an Out-Of-Memory (OOM) killer, or suffers an unhandled process termination mid-job:
+                        1. The job remains trapped in RUNNING status forever in PostgreSQL.
+                        2. The job never completes, never retries, and never moves to dead-letter storage.
+                        3. Recurring schedules may halt or misbehave because the platform thinks the previous run is still executing.
+
+
+2. The 5-Phase Recovery Mechanism
+
+        Phase 1: The Dead Man's Switch in Redis
+
+                Executor sends heartbeat: An executor periodically refreshes an in-memory key in Redis
+
+                ```
+                Key: executor:<executor-id>:heartbeat
+                Value: ALIVE
+                TTL: 30 seconds (refreshed every 10 seconds)
+
+                ```
+
+                Failure Trigger: If the executor dies, heartbeats stop. After 30 seconds, Redis automatically evicts the key. The missing key is the platform's tripwire.
+
+
+        Phase 2: Candidate Identification in PostgreSQL
+
+                Located in: JobRunRepository.java -> Every 20 seconds, ExecutorLivenessWatcher.scanAndRecoverOrphanedRuns() queries PostgreSQL for candidate runs:
+
+                ```
+                SELECT r FROM JobRun r
+                WHERE r.status = 'RUNNING'
+                  AND r.modificationTime <= :threshold
+                ORDER BY r.modificationTime ASC
+
+                ```
+                Why modification_time <= NOW - 30s is an Age Grace Period (NOT a Polling Timestamp): modification_time is not updated every 30 seconds by the executor during execution (which would overload PostgreSQL with writes). It is only written when the job state transitions to RUNNING.
+                Therefore, this 30-second filter serves strictly as a grace period so newly dispatched jobs that are in their first 30 seconds of running are never checked before their first heartbeat is registered.
+
+
+        Phase 3: In-Memory Liveness Verification (Redis)
+
+                Located in: ExecutorLivenessWatcher.java
+
+                For each candidate run fetched from the DB:
+
+                ```
+                String heartbeatKey = "executor:" + executorId + ":heartbeat";
+                Boolean isAlive = redisTemplate.hasKey(heartbeatKey);
+
+                ```
+
+                1. If isAlive == true: The executor is alive. The job is simply running longer than 30 seconds (e.g., a heavy batch task). The watcher logs DEBUG and takes zero action. Zero DB updates are made.
+                2. If isAlive == false: The Dead Man's Switch has tripped. The executor is dead, and the run is an orphaned zombie.
+
+
+        Phase 4: Surrogate Executor & Fail-Safe Dispatch Ordering 
+
+                Located in: ExecutorRecoveryProducer.java
+
+                Since the original executor is gone, the watcher-service assumes the role of a Surrogate Executor. To guarantee data consistency across the two Kafka topics without 2PC distributed transactions, it uses Solution B (Fail-Safe Ordering):
+
+                Step 4.1: Secure the Retry First
+                        - If attempt < maxRetries: Publishes JobRetryEvent to topic retry with exponential backoff: Backoff = 2^{attempt} \times 10s
+                        - If attempt >= maxRetries: Publishes JobDeadEvent to topic dead.
+                        - Both dispatches use .get(5, TimeUnit.SECONDS) to guarantee Kafka broker acknowledgement.
+
+
+                Step 4.2: Close the Failed Run Second 
+                        - Dispatches JobRunLifecycleEvent(status = EXECUTOR_DIED) to topic job-run-events.
+
+
+                Why Fail-Safe Ordering guarantees zero job loss: If the watcher were to publish the lifecycle failure first and then crash before publishing the retry, the job would be permanently recorded as dead with no retry scheduled.
+                By sending the retry event first, even if the watcher crashes halfway, the retry is already secured in Kafka. The platform's Redis Lua deduplication (SETNX retry:dedup:{jobId}:{attempt}) prevents any double-retries if the next watcher iteration re-scans the job.
+
+
+        Phase 5: Downstream Processing (Single DB Writer Architecture)
+        In alignment with ZenSys's Approach B (Single DB Writer), watcher-service never writes directly to PostgreSQL for recovery:
+
+                1. consumer-service:
+                        - Receives JobRunLifecycleEvent(status = EXECUTOR_DIED).
+                        - Marks the run status as FAILED in job_runs table with: 
+                                 = error_message = "Executor heartbeat expired in Redis: Dead Man's Switch tripped"
+
+                        - Updates end_time and duration_ms.
+                        - For CRON / INTERVAL jobs, retains SCHEDULED so future schedules trigger normally.
+
+                2. retry-service:
+                        - Consumes JobRetryEvent.
+                        - Holds the backoff in its Redis sorted set / scheduler.
+                        - When the delay expires, publishes a fresh JobRunCommand to the run topic for consumption by any available, healthy executor.
+
+
+3. Concurrency & Performance Hardening
+
+        -Since with this we have 2 scheudled flows 1. for job polling and 2. for heartbeat checking, we cannot have wachter-service being single, threaded, as both scheudled methods can block each-other
+
+
+        Why This Is an Issue (Spring's Default Behavior)
+        
+                When you add @EnableScheduling in Spring Boot, Spring internally creates a ThreadPoolTaskScheduler with a default pool size of 1 (pool-size: 1).
+
+                Both of our @Scheduled tasks:
+                        - WatcherScheduler.scheduleJobPolling() (Every 20s)
+                        - ExecutorLivenessWatcher.scanAndRecoverOrphanedRuns() (Every 20s) 
+                        are placed into the same queue and run on the exact same single thread (named scheduling-1)
+
+The Real Production Consequences of a Single Thread
+        
+        Head-of-Line Blocking & Starvation:
+                - If scheduleJobPolling() wakes up and has 100 due jobs to claim and dispatch to Kafka (taking, say, 2–3 seconds), scanAndRecoverOrphanedRuns() cannot run. It is stuck waiting in queue.
+                - If scanAndRecoverOrphanedRuns() wakes up and checks Redis for dead executors, regular job polling is frozen until the zombie scan finishes.
+        
+        Schedule Drift:
+                - Both methods use fixedDelay. A delay in Task A directly delays the next trigger of Task B, causing polling cycles to drift and miss their 20-second rhythm.
+        
+        Fate-Sharing (Blast Radius):
+                - If the zombie sweeper encounters temporary network latency on Redis or Kafka, the entire dispatch engine of the platform halts because the sole thread is blocked.
+
+The Fix: Multi-Threaded Task Scheduling -> We can fix this immediately by giving Spring Boot a dedicated thread pool for @Scheduled tasks in application.properties:
+
+```
+# Spring Task Scheduler Pool Size (Default is 1)
+spring.task.scheduling.pool.size=4
+spring.task.scheduling.thread-name-prefix=watcher-sched-
+
+```
+
+What this accomplishes:
+        - scheduleJobPolling() runs on watcher-sched-1.
+        - scanAndRecoverOrphanedRuns() runs on watcher-sched-2.
+        - They execute concurrently and independently in parallel. Neither task can ever block, starve, or delay the other.
+        (And because ZenSys runs on Java 25, we can also set spring.threads.virtual.enabled=true, which causes Spring Boot to run every scheduled task on its own lightweight virtual thread).
+
+
+
+---------------------------------------------------------------------------------------------------------
+| Component      | Setting                              | Purpose                                      |
+|----------------|--------------------------------------|-----------------------------------------------|
+| Scheduler Pool | spring.task.scheduling.pool.size=4   | Separates regular job polling                 |
+|                |                                      | (watcher-sched-1) from zombie sweeping        |
+|                |                                      | (watcher-sched-2), preventing Head-of-Line    |
+|                |                                      | blocking.                                     |
+|                |                                      |                                               |
+|                |                                      |                                               |
+| Virtual Threads| spring.threads.virtual.enabled=true  | Java 25 virtual threads handle blocking       |
+|                |                                      | network calls (Kafka acks, Redis queries)     |
+|                |                                      | with negligible OS thread overhead.           |
+|                |                                      |                                               |
+|                |                                      |                                               |
+| Redis Lookups  | redisTemplate.hasKey(...)            | In-memory query takes < 0.2ms; zero query     |
+|                |                                      | load on PostgreSQL for active jobs.           |
+|                |                                      |                                               |
+|                |                                      |                                               |
+| Batch Bounds   | PageRequest.of(0, 100)               | Prevents memory spikes by limiting the        |
+|                |                                      | maximum number of stale runs evaluated in     |
+|                |                                      | any single 20-second sweep.                   |
+--------------------------------------------------------------------------------------------------------
+
+
+
+
+
+next    1. implement api gateway
+        2. implment service discovery

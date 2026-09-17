@@ -115,7 +115,7 @@ public class JobRunPersistenceService {
                     log.info("Transitioned runId={} to SUCCESS (duration={}ms)", currentRun.getRunId(),
                             event.getExecutionTimeMs());
                 }
-                case FAILED, TIMEOUT -> {
+                case FAILED, TIMEOUT, EXECUTOR_DIED -> {
                     currentRun.setStatus(event.getStatus());
                     currentRun.setEndTime(eventTime);
                     currentRun.setExecutionTimeMs(event.getExecutionTimeMs());
@@ -170,7 +170,7 @@ public class JobRunPersistenceService {
                                 job.getId(), job.getStatus(), event.getRunId());
                     }
                 }
-                case SUCCESS, FAILED, TIMEOUT -> {
+                case SUCCESS, FAILED, TIMEOUT, EXECUTOR_DIED -> {
                     // Fast execution where terminal state arrived before PENDING or RUNNING
                     JobRun run = JobRun.builder()
                             .runId(event.getRunId())
@@ -266,7 +266,7 @@ public class JobRunPersistenceService {
             }
             jobRepository.save(job);
         } else {
-            // On FAILED or TIMEOUT:
+            // On FAILED or TIMEOUT or EXECUTOR_DIED:
             // All jobs (ONCE, CRON, INTERVAL) follow the retry pipeline.
             // Retain RUNNING status to avoid false SCHEDULED flapping while retries are
             // in-flight.
