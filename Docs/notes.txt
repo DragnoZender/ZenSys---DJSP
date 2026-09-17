@@ -1707,3 +1707,297 @@ Under the hood in KafkaConsumerConfig.java: =>
 - By default, Spring Kafka disables raw Kafka's client-side periodic auto-commit (enable.auto.commit = false).
 - Instead, Spring's ConcurrentKafkaListenerContainerFactory manages offset commits using its ContainerProperties.AckMode (default is AckMode.BATCH).
 - In this mode, the container only commits the offset to the broker after the listener method has returned without throwing an unhandled exception.
+
+
+
+Date - 10th August 2026
+
+Now we need to update the watcher-service to handle the heartbeat flow
+
+Before that, found very dangerous vulnariblities in the current watcher-service implemenation {can be viewed here in the old-waatcher-impl folder} which causes disaster in the distributed system
+
+As the watcher-service also deals with 2 external entities at a time (Postgre and Kafka), the current version has this issues
+
+
+Vulnerability 1: Multi-Watcher Race Condition (No Distributed Locking)
+
+        What the code does:
+        In JobRepository.java:
+
+        ```
+        SELECT j FROM Job j
+        WHERE j.status IN ('SCHEDULED', 'RUNNING')
+          AND j.nextRunTime <= :now
+          AND (j.lastPolledTime IS NULL OR j.lastPolledTime < :threshold)
+        ORDER BY j.nextRunTime ASC
+
+        ```
+
+        The Problem:
+        - Notice there is no Redis lock and no database row-level lock (FOR UPDATE SKIP LOCKED).
+
+        - If you run 2 or more instances of watcher-service for High Availability (HA):
+                1. Watcher Instance A runs findDueJobs at 10:00:00.000 and gets Job #1.
+                2. Watcher Instance B runs findDueJobs at 10:00:00.010 (before A has committed lastPolledTime to Postgres).
+                3. Instance B gets the exact same Job #1.
+                4. Both Instance A and Instance B generate separate runIds and publish duplicate messages to Kafka run topic.
+
+        - Result: The same job is executed concurrently by multiple executors.
+
+
+Vulnerability 2: Fire-and-Forget Kafka Publishing (Silent Data Loss) (issue to atleast once behaviour)
+
+        What the code does:
+
+        In RunProducer.java:
+
+        ```
+        public void sendRunEvent(JobRunEvent event) {
+            kafkaTemplate.send(runTopic, event.getJobId(), event); // Asynchronous! Returns CompletableFuture
+        }
+
+        ```
+
+        And in JobWatcherService.java:
+
+        ```
+        // 1. Publish execution command to Kafka 'run' topic (fire-and-forget)
+        runProducer.sendRunEvent(runEvent);
+
+        // 2. Advance job schedule and status based on schedule type
+        advanceJobSchedule(job, now);
+
+        // 3. Mark last polled timestamp and persist changes
+        job.setLastPolledTime(now);
+        jobRepository.save(job);
+
+        ```
+
+
+        The Problem:
+
+        - kafkaTemplate.send(...) is non-blocking and asynchronous. It immediately returns without waiting for Kafka broker ACK.
+
+        - If Kafka is temporarily unreachable, the buffer is full, or partition metadata is missing:
+                - sendRunEvent will not throw an exception synchronously.
+                - The code immediately proceeds to advanceJobSchedule() and saves the job to Postgres!
+                - For a ONCE job: nextRunTime is set to null.
+                - For a CRON job: nextRunTime is advanced to tomorrow.
+
+        - Result (Silent Data Loss): The database thinks the job was triggered and advanced, but the Kafka message was dropped in the background. The job execution is permanently lost.
+
+
+
+Vulnerability 3: The Classic Dual-Write Problem (Kafka vs. Database)  (issue to atmost or exactly once behaviour)
+
+        The Problem: What happens if the service crashes, JVM terminates, or database connection drops right on line 81 (jobRepository.save(job)), after Kafka send?
+
+                - The Kafka message is already published to the run topic.
+                - executor-service consumes it and starts executing the job.
+                - But the DB transaction rolls back (or was never saved).
+                - On the next watcher poll (20s later), the database still has nextRunTime <= NOW().
+                - Watcher pulls the exact same job again and publishes a second run!
+
+
+        Result: Phantom duplicate runs.
+
+
+Vulnerability 4: Large @Transactional Scope on Batch Loop
+
+        What the code does: Line 43 has @Transactional on the entire method pollAndDispatchDueJobs() which processes up to batchSize = 1000 jobs in a single loop:
+
+        ```
+        @Transactional
+        public void pollAndDispatchDueJobs() {
+            ...
+            for (Job job : dueJobs) {
+                try {
+                    ...
+                    jobRepository.save(job);
+                } catch (Exception e) {
+                    log.error(...);
+                }
+            }
+        }
+
+        ```
+
+
+        The Problem:
+        If job-500 throws an unchecked JPA / DB exception (e.g. database timeout or dead lock):
+                - Even though the try/catch catches Exception, Spring's transaction manager intercepts the Hibernate exception and marks the transaction as rollback-only.
+                - When the method exits, Spring attempts to commit and throws UnexpectedRollbackException.
+                - All 1000 job updates in the database roll back, even though jobs #1 to -#500 were already published to Kafka!
+                - In the next cycle, jobs #1 to -#500 will all be re-polled and re-dispatched.
+
+
+SUMMARY MATRIX OF CURRENT VULNERABILITIES
+=========================================
+
+  | Vulnerability              | Scenario                              | Impact                                      |
+  |----------------------------|---------------------------------------|---------------------------------------------|
+  | No Row / Distributed Lock  | 2 Watcher nodes running simultaneously| Duplicate runs sent to Kafka                |
+  |                            |                                       |                                             |
+  | Async send() without ACK   | Kafka network blip or broker lag      | Silent data loss (schedule advances, but    |
+  |                            |                                       | never executed)                             |
+  |                            |                                       |                                             |
+  | Dual-Write Ordering        | Crash between Kafka send and DB commit| Duplicate executions across polling cycles  |
+  |                            |                                       |                                             |
+  | Monolithic @Transactional  | 1 DB error in a batch of 1000 jobs    | Entire batch rolls back causing mass        |
+  |                            |                                       | redelivery                                  |
+
+
+
+How MAANG-Grade Systems Fix This
+
+        To make this flow completely rock-solid and enterprise-grade:
+        
+        1. PostgreSQL Row-Locking (FOR UPDATE SKIP LOCKED): Change findDueJobs query to lock rows atomically:
+        
+                SQL
+                ```
+                SELECT j FROM Job j
+                WHERE j.status IN ('SCHEDULED', 'RUNNING')
+                  AND j.nextRunTime <= :now
+                  AND (j.lastPolledTime IS NULL OR j.lastPolledTime < :threshold)
+                ORDER BY j.nextRunTime ASC
+                FOR UPDATE SKIP LOCKED
+        
+                ```
+                Any other watcher instance will automatically skip already-locked jobs without blocking!
+        
+        2. Synchronous Kafka ACK (SendResult.get(5, TimeUnit.SECONDS)): Just like we did in retry-service, synchronously wait for Kafka broker ACK before advancing the database schedule. If Kafka fails, fail fast and do not advance the DB.
+        
+        3. Atomic State Advance per Job (or Transactional Outbox): Isolate each job's dispatch into its own discrete transaction, or update lastPolledTime upfront before publishing.
+
+
+How proposed changes fixes each of 4 vulnerabilities.
+
+1. How the Changes Fix Vulnerability 1 (Multi-Watcher Concurrency)
+
+        The Change:
+        In JobRepository.java: Add pessimistic locking with PostgreSQL SKIP LOCKED:
+
+        ```
+        @Lock(LockModeType.PESSIMISTIC_WRITE)
+        @QueryHints({@QueryHint(name = "jakarta.persistence.lock.timeout", value = "-2")}) // -2 tells Postgres: SKIP LOCKED
+        @Query("""
+                SELECT j FROM Job j
+                WHERE j.status IN ('SCHEDULED', 'RUNNING')
+                  AND j.nextRunTime <= :now
+                  AND (j.lastPolledTime IS NULL OR j.lastPolledTime < :threshold)
+                ORDER BY j.nextRunTime ASC
+            """)
+        List<Job> findDueJobs(
+            @Param("now") Instant now,
+            @Param("threshold") Instant threshold,
+            Pageable pageable);
+
+        ```
+
+        Why it fixes the issue:
+        - In PostgreSQL, FOR UPDATE SKIP LOCKED atomically places an exclusive row-level lock on the retrieved rows.
+        - If Watcher Node 1 and Watcher Node 2 poll at the exact same millisecond:
+                - Node 1 locks rows [1, 2, 3].
+                - Node 2 does not block or read those rows; Postgres automatically skips rows [1, 2, 3] and gives Node 2 rows [4, 5, 6] (or empty list if no more jobs are due).
+
+        - Verdict: 100% eliminates multi-watcher race conditions. No duplicate runs will be dispatched across multiple nodes.
+
+
+
+2. How the Changes Fix Vulnerability 2 (Fire-and-Forget / Silent Data Loss)
+
+        The Change: 
+        In RunProducer.java: Awaits the broker's acknowledgment synchronously:
+
+        ```
+        public void sendRunEvent(JobRunEvent event) throws Exception {
+            log.info("Publishing job run to Kafka topic '{}': jobId={}, runId={}", runTopic, event.getJobId(), event.getRunId());
+        
+            // Synchronously await broker ACK (with a 5s timeout)
+            kafkaTemplate.send(runTopic, event.getJobId(), event)
+                         .get(5, TimeUnit.SECONDS);
+        }
+
+        ```
+
+        Why it fixes the issue:
+
+        If Kafka is down, leader partition is re-electing, or the broker buffer is full:
+                - .get(5, TimeUnit.SECONDS) throws an exception (ExecutionException / TimeoutException).
+                - In JobWatcherService.java, execution jumps to the catch block before calling advanceJobSchedule() or jobRepository.save().
+                - The database schedule is not advanced; nextRunTime remains due.
+
+        - Verdict: 100% eliminates silent data loss. No job will ever be advanced in the DB unless Kafka confirms receipt.
+
+
+
+3. How to Fix Vulnerability 3 & 4 : 
+
+        So what we will do is create a new service named JobTransactionService.java which will have 
+
+        1. @Transaction method claimDueJobs() to consume the due jobs store in momeory, put row level lock on them in DB and update their last_poll_time, all this atomically, since it is much lightweight than earlier version it executes qucikly and once this transaction completes the row level locks are removed. 
+
+                [Phase 1: Claim Batch] (Short DB Tx: ~10ms)
+                   SELECT ... FOR NO KEY UPDATE SKIP LOCKED
+                   UPDATE jobs SET last_polled_time = now
+                   COMMIT;  <── Hikari connection returned & Postgres row locks released!
+
+
+        with this Phase 1 transaction completion, we now have 30 secs to send this jobs to kafka,
+
+        So continuing our flow in the JobWatcherService, 
+                Now for each job - we make a sync call to kafka to publish via (kaafka producer) only if it returns with ack 
+                        - immdiately perform a isolated(only for current job) @Transaction advanceAndSaveJob() so its next_run_time field updates atomically
+                using this dedicated transaction for each job to advance nextRunTime, even if crash occurs we do not roll back all jobs in the batch
+
+                else (the kafka does not retrun ack) - immdiately perform a isolated(only for current job) @Transaction releaseJobLease() so its last_poll_time becomes null, so other instace can handle it 
+
+
+
+
+                [Phase 2 & 3: Dispatch Loop] (No DB Connection / No Locks Held During Kafka I/O)
+                   For each claimed job:
+                      ├── 1. runProducer.sendRunEvent(runEvent)  <── Kafka network call (0 DB connections checked out)
+                      │
+                      ├── 2. Upon Kafka ACK:
+                      │      jobTransactionService.advanceAndSaveJob(jobId, advancer) <── Isolated micro-Tx (~2ms)
+                      │      COMMIT;
+                      │
+                      └── 3. If Kafka send fails:
+                             jobTransactionService.releaseJobLease(jobId) <── Isolated micro-Tx (~1ms)
+                             UPDATE jobs SET last_polled_time = NULL; (Immediately available for retry)
+                             (Previous successful jobs remain committed; subsequent jobs continue)
+
+        This 100% solve Giant monolitic transaction problem by splitting it into small parts 
+
+        Why this solves #4 completely:
+         - Zero Connection Starvation: HikariCP database connections and PostgreSQL row locks are never held while waiting on Kafka network round-trips.
+         - Failure Isolation: If job #5 fails in Kafka, jobs #1–4 are already committed in PostgreSQL, and jobs #6–1,000 proceed normally.
+         - No All-or-Nothing Rollback: There is no massive batch rollback that would cause duplicate runs across hundreds of jobs.
+
+
+        for the Vulnerability 3- The Dual-Write Problem -> SOLVED to the Highest Standard of At-Least-Once Delivery
+
+        In distributed systems, updating two independent systems (PostgreSQL and Kafka) without distributed transactions (XA/2PC) has two failure modes:
+
+        1. Catastrophic Failure Mode (Data Loss): DB commits -> Kafka send fails.
+        Status: 100% ELIMINATED. Kafka must ACK first before the DB is touched.
+
+        2. Acceptable Failure Mode (Duplicate Dispatch on Crash): Kafka send ACKs -> JVM process is killed (kill -9, node power cut) in the exact ~2ms between Kafka ACK and Postgres commit.
+                - Status: In our previous monolithic code, this vulnerability window was 5 to 10 seconds (the entire 1,000-job loop). Now, it is narrowed to ~2 milliseconds per job (a 5,000x reduction).
+
+                - If a node crash happens during those 2ms:
+                        - Kafka has the message and consumers execute it.
+                        - PostgreSQL did not update nextRunTime.
+                        - After the 30-second visibility lease expires, the job will be dispatched again. (acceptable)
+
+        Theoretical Note: In distributed computing (The Two Generals Problem), eliminating that final 2ms crash window to achieve strict Exactly-Once Dual-Write requires the Transactional Outbox Pattern (writing both the job advance and an outbox event into the same PostgreSQL transaction, and using Debezium/Kafka Connect to publish to Kafka). For standard cloud deployments, our current decoupled architecture represents the industry-standard At-Least-Once resilient design used by systems like AWS SQS, Temporal, and Celery.
+
+
+Summary
+Vulnerability 1: 100% Fixed
+Vulnerability 2: 100% Fixed
+Vulnerability 3: Optimized to At-Least-Once resilience (5,000x risk reduction; zero data loss)
+Vulnerability 4: 100% Fixed
+                

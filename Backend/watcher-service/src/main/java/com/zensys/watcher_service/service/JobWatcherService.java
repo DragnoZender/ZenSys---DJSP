@@ -8,10 +8,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.github.f4b6a3.ulid.UlidCreator;
 import com.zensys.watcher_service.event.JobRunEvent;
@@ -19,7 +17,6 @@ import com.zensys.watcher_service.kafka.RunProducer;
 import com.zensys.watcher_service.model.Job;
 import com.zensys.watcher_service.model.JobStatus;
 import com.zensys.watcher_service.model.ScheduleType;
-import com.zensys.watcher_service.repository.JobRepository;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -31,7 +28,7 @@ public class JobWatcherService {
 
     private static final ZoneId DEFAULT_ZONE = ZoneId.of("Asia/Kolkata");
 
-    private final JobRepository jobRepository;
+    private final JobTransactionService jobTransactionService;
     private final RunProducer runProducer;
 
     @Value("${watcher.batch-size:1000}")
@@ -40,23 +37,24 @@ public class JobWatcherService {
     @Value("${watcher.lock-threshold-seconds:30}")
     private long lockThresholdSeconds;
 
-    @Transactional
     public void pollAndDispatchDueJobs() {
         Instant now = Instant.now();
         Instant threshold = now.minusSeconds(lockThresholdSeconds);
 
-        List<Job> dueJobs = jobRepository.findDueJobs(now, threshold, PageRequest.of(0, batchSize));
-        
-        System.out.println("\n\n jobs pulled count = "+dueJobs.size() + "\n\n");
-        
+        // Phase 1: Claim batch of due jobs in a short isolated DB transaction (~10ms)
+        List<Job> dueJobs = jobTransactionService.claimDueJobs(now, threshold, batchSize);
+
+        System.out.println("\n\n jobs pulled count = " + dueJobs.size() + "\n\n");
+
         if (dueJobs.isEmpty()) {
             log.trace("No due jobs found to dispatch at {}", now);
             return;
         }
 
-        
         log.info("Found {} due job(s) for execution at {}", dueJobs.size(), now);
 
+        // Phase 2 & 3: Dispatch over Kafka (Network I/O) without holding open DB
+        // connections or row locks
         for (Job job : dueJobs) {
             try {
                 String runId = UlidCreator.getUlid().toString();
@@ -70,20 +68,19 @@ public class JobWatcherService {
                         .maxRetries(job.getRetries())
                         .build();
 
-                // 1. Publish execution command to Kafka 'run' topic
+                // 1. Publish execution command to Kafka 'run' topic (Synchronous network I/O)
                 runProducer.sendRunEvent(runEvent);
 
-                // 2. Advance job schedule and status based on schedule type
-                advanceJobSchedule(job, now);
-
-                // 3. Mark last polled timestamp and persist changes
-                job.setLastPolledTime(now);
-                jobRepository.save(job);
+                // 2. Advance schedule and status in an isolated micro-transaction (~2ms)
+                Job updatedJob = jobTransactionService.advanceAndSaveJob(job.getId(), j -> advanceJobSchedule(j, now));
 
                 log.info("Successfully dispatched job '{}' (id={}) with runId={}, nextRunTime={}",
-                        job.getName(), job.getId(), runId, job.getNextRunTime());
+                        job.getName(), job.getId(), runId, updatedJob != null ? updatedJob.getNextRunTime() : null);
             } catch (Exception e) {
                 log.error("Failed to dispatch due job '{}' (id={}): {}", job.getName(), job.getId(), e.getMessage(), e);
+                // Immediately release lease so the job can be retried wi
+                // thout waiting for threshold timeout
+                jobTransactionService.releaseJobLease(job.getId());
                 if (Thread.currentThread().isInterrupted()) {
                     log.warn("Watcher polling thread interrupted. Stopping batch dispatch.");
                     break;
