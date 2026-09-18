@@ -2,6 +2,7 @@ package com.zensys.job_service.controller;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -12,7 +13,6 @@ import org.springframework.web.bind.annotation.RestController;
 import com.zensys.job_service.dto.CreateJobRequest;
 import com.zensys.job_service.dto.UpdateJobRequest;
 import com.zensys.job_service.service.JobService;
-
 
 @RestController
 @RequestMapping("/jobs")
@@ -29,10 +29,10 @@ public class JobController {
     @PutMapping("/update/{jobId}")
     public ResponseEntity<String> updateJob(@PathVariable String jobId, @RequestBody UpdateJobRequest request) {
 
-        return ResponseEntity.ok( jobService.updateJob(jobId, request));
+        return ResponseEntity.ok(jobService.updateJob(jobId, request));
     }
 
-    @RequestMapping("/delete/{jobId}")
+    @DeleteMapping("/delete/{jobId}")
     public ResponseEntity<String> deleteJob(@PathVariable String jobId) {
         return ResponseEntity.ok(jobService.deleteJob(jobId));
     }

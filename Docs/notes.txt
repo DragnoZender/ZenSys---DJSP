@@ -2215,6 +2215,8 @@ What this accomplishes:
 
 
 
+18th sept 2026
 
-next    1. implement api gateway
-        2. implment service discovery
+ApiGateway and Service-Registry implemented
+
+next: Testing
