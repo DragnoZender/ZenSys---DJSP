@@ -2219,4 +2219,24 @@ What this accomplishes:
 
 ApiGateway and Service-Registry implemented
 
-next: Testing
+
+
+20th sept 2026
+
+Updated the Job-Search-Service to have querying for the run entities also :- 
+
+What Was Done:
+1. Entities & Enums :
+        - Added JobRunStatus.java and JobRun.java to map the job_runs table stored by consumer-service.
+        - Updated Job.java with @JdbcTypeCode(SqlTypes.JSON) for JSONB fields and linked the jobRuns relationship.
+
+2. Repositories & DTOs:
+        - Created JobRunRepository.java to query runs by job ID, run ID, and status.
+        - Updated JobRepository.java to add status and schedule-type filtering.
+        - Created JobRunResponse.java.
+
+3. Endpoints in JobSearchController.java:
+        - GET /jobs?status=...&scheduleType=...: Query jobs with optional status/schedule type filtering.
+        - GET /jobs/{jobId}/runs: Query execution history for a specific job.
+        - GET /jobs/runs/{runId}: Query individual run details (timestamps, duration, executor, failure error messages).
+        - GET /jobs/runs?status=...: Query runs across all jobs, with optional status filtering.
