@@ -4,57 +4,63 @@
 
 @layer base {
   body {
-    @apply bg-[#080c14] text-slate-100 min-h-screen font-sans;
+    @apply bg-panel-bg text-slate-100 min-h-screen font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
-  /* Custom subtle scrollbar */
+  /* Clean subtle scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
 
   ::-webkit-scrollbar-track {
-    background: rgba(15, 23, 42, 0.6);
+    background: #0c0e15;
   }
 
   ::-webkit-scrollbar-thumb {
-    background: rgba(71, 85, 105, 0.5);
-    border-radius: 9999px;
+    background: #232838;
+    border-radius: 4px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(99, 102, 241, 0.6);
+    background: #3a4159;
   }
 }
 
-/* Glassmorphic panels */
-.glass-panel {
-  background: rgba(15, 23, 42, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+/* Hostinger-style clean container panels (no tacky neon glows) */
+.cloud-card {
+  background-color: #131622;
+  border: 1px solid #232838;
+  border-radius: 0.75rem;
 }
 
-.glass-card {
-  background: linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.6) 100%);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+.cloud-card-interactive {
+  background-color: #131622;
+  border: 1px solid #232838;
+  border-radius: 0.75rem;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.glass-card:hover {
-  border-color: rgba(99, 102, 241, 0.3);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+.cloud-card-interactive:hover {
+  border-color: #3b425b;
+  background-color: #161a29;
 }
 
-/* Subtle glowing accent line */
-.accent-glow {
-  box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.3);
+.cloud-input {
+  background-color: #0c0e15;
+  border: 1px solid #232838;
+  border-radius: 0.5rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* Monospace font for JSON and Cron */
+.cloud-input:focus {
+  border-color: #673de6;
+  outline: none;
+  box-shadow: 0 0 0 1px #673de6;
+}
+
+/* Monospace font for IDs, JSON, Cron, Timestamps */
 .font-mono-code {
   font-family: 'JetBrains Mono', monospace, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas;
 }

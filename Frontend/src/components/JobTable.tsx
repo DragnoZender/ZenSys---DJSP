@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Job, JobStatus, ScheduleType } from '../types/job';
-import { StatusBadge } from './StatusBadge';
+import { Job, JobStatus, ScheduleType, JobRun } from '../types/job';
+import { StatusBadge, JobRunStatusBadge } from './StatusBadge';
 import { 
   Search, 
   Filter, 
@@ -21,6 +21,7 @@ import cronstrue from 'cronstrue';
 
 interface JobTableProps {
   jobs: Job[];
+  runs: JobRun[];
   searchQuery: string;
   onSearchChange: (val: string) => void;
   statusFilter: JobStatus | 'ALL';
@@ -36,6 +37,7 @@ interface JobTableProps {
 
 export const JobTable: React.FC<JobTableProps> = ({
   jobs,
+  runs,
   searchQuery,
   onSearchChange,
   statusFilter,
@@ -57,6 +59,10 @@ export const JobTable: React.FC<JobTableProps> = ({
     setCopiedId(jobId);
     onCopyId(jobId);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const getLatestRunForJob = (jobId: string) => {
+    return runs.find((r) => r.jobId === jobId);
   };
 
   const formatScheduleDetail = (job: Job) => {
@@ -86,11 +92,10 @@ export const JobTable: React.FC<JobTableProps> = ({
   };
 
   const formatTimestamp = (isoString?: string | null) => {
-    if (!isoString) return '--';
+    if (!isoString) return <span className="text-slate-500 font-mono-code text-xs">--</span>;
     const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '--';
+    if (isNaN(date.getTime())) return <span className="text-slate-500 font-mono-code text-xs">--</span>;
     
-    // Check if within 24 hours
     const diffMs = date.getTime() - Date.now();
     const isFuture = diffMs > 0;
     const diffHours = Math.abs(Math.round(diffMs / (1000 * 60 * 60)));
@@ -116,9 +121,9 @@ export const JobTable: React.FC<JobTableProps> = ({
   };
 
   return (
-    <div className="rounded-xl border border-slate-800/90 glass-panel overflow-hidden">
+    <div className="rounded-xl border border-panel-border bg-panel-surface overflow-hidden">
       {/* Table Controls: Search & Filters */}
-      <div className="p-4 border-b border-slate-800/80 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 bg-slate-900/40">
+      <div className="p-3.5 border-b border-panel-border flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 bg-panel-surface">
         {/* Search Bar */}
         <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -127,12 +132,12 @@ export const JobTable: React.FC<JobTableProps> = ({
             placeholder="Search by job name, payload, or ID..."
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 bg-slate-950/70 border border-slate-800 rounded-lg text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500/70 focus:ring-1 focus:ring-brand-500/50 transition-all"
+            className="w-full pl-9 pr-4 py-1.5 bg-panel-bg border border-panel-border rounded-lg text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-hostinger-600 focus:ring-1 focus:ring-hostinger-600 transition-colors"
           />
           {searchQuery && (
             <button
               onClick={() => onSearchChange('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500 hover:text-slate-300"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white"
             >
               Clear
             </button>
@@ -140,36 +145,36 @@ export const JobTable: React.FC<JobTableProps> = ({
         </div>
 
         {/* Filter Dropdowns */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 bg-slate-950/70 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300">
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 bg-panel-bg border border-panel-border rounded-lg px-2.5 py-1.5 text-xs text-slate-300">
             <Filter className="w-3.5 h-3.5 text-slate-500" />
-            <span className="text-slate-500 hidden sm:inline">Status:</span>
+            <span className="text-slate-400 hidden sm:inline">Status:</span>
             <select
               value={statusFilter}
               onChange={(e) => onStatusFilterChange(e.target.value as JobStatus | 'ALL')}
               className="bg-transparent text-slate-200 focus:outline-none cursor-pointer"
             >
-              <option value="ALL" className="bg-slate-900 text-slate-200">All Statuses</option>
-              <option value="SCHEDULED" className="bg-slate-900 text-slate-200">Scheduled</option>
-              <option value="RUNNING" className="bg-slate-900 text-slate-200">Running</option>
-              <option value="PAUSED" className="bg-slate-900 text-slate-200">Paused</option>
-              <option value="COMPLETED" className="bg-slate-900 text-slate-200">Completed</option>
-              <option value="FAILED_PERMANENTLY" className="bg-slate-900 text-rose-300">Failed (DLQ)</option>
-              <option value="CANCELLED" className="bg-slate-900 text-slate-400">Cancelled</option>
+              <option value="ALL" className="bg-panel-surface text-slate-200">All Statuses</option>
+              <option value="SCHEDULED" className="bg-panel-surface text-slate-200">Scheduled</option>
+              <option value="RUNNING" className="bg-panel-surface text-slate-200">Running</option>
+              <option value="PAUSED" className="bg-panel-surface text-slate-200">Paused</option>
+              <option value="COMPLETED" className="bg-panel-surface text-slate-200">Completed</option>
+              <option value="FAILED_PERMANENTLY" className="bg-panel-surface text-rose-300">Failed (DLQ)</option>
+              <option value="CANCELLED" className="bg-panel-surface text-slate-400">Cancelled</option>
             </select>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-950/70 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300">
-            <span className="text-slate-500 hidden sm:inline">Type:</span>
+          <div className="flex items-center gap-1.5 bg-panel-bg border border-panel-border rounded-lg px-2.5 py-1.5 text-xs text-slate-300">
+            <span className="text-slate-400 hidden sm:inline">Type:</span>
             <select
               value={typeFilter}
               onChange={(e) => onTypeFilterChange(e.target.value as ScheduleType | 'ALL')}
               className="bg-transparent text-slate-200 focus:outline-none cursor-pointer"
             >
-              <option value="ALL" className="bg-slate-900 text-slate-200">All Types</option>
-              <option value="CRON" className="bg-slate-900 text-slate-200">CRON</option>
-              <option value="ONCE" className="bg-slate-900 text-slate-200">ONCE</option>
-              <option value="INTERVAL" className="bg-slate-900 text-slate-200">INTERVAL</option>
+              <option value="ALL" className="bg-panel-surface text-slate-200">All Types</option>
+              <option value="CRON" className="bg-panel-surface text-slate-200">CRON</option>
+              <option value="ONCE" className="bg-panel-surface text-slate-200">ONCE</option>
+              <option value="INTERVAL" className="bg-panel-surface text-slate-200">INTERVAL</option>
             </select>
           </div>
 
@@ -180,7 +185,7 @@ export const JobTable: React.FC<JobTableProps> = ({
                 onStatusFilterChange('ALL');
                 onTypeFilterChange('ALL');
               }}
-              className="p-2 text-xs text-slate-400 hover:text-white rounded-lg bg-slate-800/60 hover:bg-slate-800 transition-colors"
+              className="p-1.5 text-xs text-slate-400 hover:text-white rounded-lg bg-panel-subtle hover:bg-panel-border transition-colors"
               title="Reset all filters"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -193,24 +198,25 @@ export const JobTable: React.FC<JobTableProps> = ({
       <div className="overflow-x-auto">
         <table className="w-full text-left border-collapse">
           <thead>
-            <tr className="border-b border-slate-800/80 bg-slate-950/40 text-[11px] font-semibold tracking-wider text-slate-400 uppercase">
+            <tr className="border-b border-panel-border bg-panel-bg/40 text-[11px] font-semibold tracking-wider text-slate-400 uppercase">
               <th className="py-3 px-4">Job Name & ID</th>
-              <th className="py-3 px-4">Schedule Type</th>
-              <th className="py-3 px-4">Expression / Time</th>
+              <th className="py-3 px-4">Type</th>
+              <th className="py-3 px-4">Schedule / Expression</th>
               <th className="py-3 px-4">Status</th>
               <th className="py-3 px-4">Next Run</th>
+              <th className="py-3 px-4">Last Run</th>
               <th className="py-3 px-4 text-center">Retries</th>
               <th className="py-3 px-4 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/50 text-sm">
+          <tbody className="divide-y divide-panel-border text-sm">
             {jobs.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center text-slate-500">
-                  <div className="flex flex-col items-center justify-center gap-2">
-                    <Clock className="w-8 h-8 text-slate-600" />
-                    <span className="font-medium text-slate-400">No jobs found matching the criteria</span>
-                    <span className="text-xs text-slate-600">Try adjusting your search or active filters</span>
+                <td colSpan={8} className="py-12 text-center text-slate-500">
+                  <div className="flex flex-col items-center justify-center gap-1.5">
+                    <Clock className="w-7 h-7 text-slate-600" />
+                    <span className="font-medium text-slate-300 text-sm">No jobs found</span>
+                    <span className="text-xs text-slate-500">Try adjusting your search query or filters</span>
                   </div>
                 </td>
               </tr>
@@ -218,26 +224,27 @@ export const JobTable: React.FC<JobTableProps> = ({
               jobs.map((job) => {
                 const schedule = formatScheduleDetail(job);
                 const isMenuOpen = actionMenuOpenId === job.jobId;
+                const latestRun = getLatestRunForJob(job.jobId);
 
                 return (
                   <tr
                     key={job.jobId}
                     onClick={() => onViewJob(job)}
-                    className="group hover:bg-slate-800/30 transition-colors cursor-pointer"
+                    className="hover:bg-panel-subtle/50 transition-colors cursor-pointer"
                   >
                     {/* Job Name & ID */}
-                    <td className="py-3.5 px-4 max-w-xs sm:max-w-sm">
-                      <div className="font-semibold text-slate-100 group-hover:text-brand-300 transition-colors truncate">
+                    <td className="py-3 px-4 max-w-xs">
+                      <div className="font-semibold text-slate-100 hover:text-white transition-colors truncate">
                         {job.name}
                       </div>
                       <div className="flex items-center gap-1.5 mt-0.5">
-                        <span className="text-[11px] font-mono-code text-slate-500 truncate max-w-[140px] sm:max-w-[180px]">
+                        <span className="text-[11px] font-mono-code text-slate-400 truncate max-w-[150px]">
                           {job.jobId}
                         </span>
                         <button
                           onClick={(e) => handleCopy(job.jobId, e)}
                           title="Copy Job ID"
-                          className="p-1 text-slate-500 hover:text-brand-400 rounded transition-colors"
+                          className="p-0.5 text-slate-400 hover:text-white transition-colors"
                         >
                           {copiedId === job.jobId ? (
                             <Check className="w-3 h-3 text-emerald-400" />
@@ -249,8 +256,8 @@ export const JobTable: React.FC<JobTableProps> = ({
                     </td>
 
                     {/* Schedule Type */}
-                    <td className="py-3.5 px-4">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-slate-800/80 text-slate-300 border border-slate-700/60 font-mono-code">
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-panel-subtle text-slate-300 border border-panel-border font-mono-code">
                         {job.scheduleType === 'CRON' && <Repeat className="w-3 h-3 text-indigo-400" />}
                         {job.scheduleType === 'ONCE' && <Calendar className="w-3 h-3 text-amber-400" />}
                         {job.scheduleType === 'INTERVAL' && <Clock className="w-3 h-3 text-emerald-400" />}
@@ -259,7 +266,7 @@ export const JobTable: React.FC<JobTableProps> = ({
                     </td>
 
                     {/* Expression / Humanized */}
-                    <td className="py-3.5 px-4 max-w-xs">
+                    <td className="py-3 px-4 max-w-xs">
                       <div className="font-mono-code text-xs text-slate-200 truncate">
                         {schedule.primary}
                       </div>
@@ -269,49 +276,59 @@ export const JobTable: React.FC<JobTableProps> = ({
                     </td>
 
                     {/* Status Badge */}
-                    <td className="py-3.5 px-4">
+                    <td className="py-3 px-4">
                       <StatusBadge status={job.status} />
                     </td>
 
                     {/* Next Run */}
-                    <td className="py-3.5 px-4">
+                    <td className="py-3 px-4">
                       {formatTimestamp(job.nextRunTime)}
                     </td>
 
+                    {/* Last Run Status (Section 4.2 wireframe) */}
+                    <td className="py-3 px-4">
+                      {latestRun ? (
+                        <div className="flex items-center gap-1.5">
+                          <JobRunStatusBadge status={latestRun.status} size="sm" />
+                        </div>
+                      ) : (
+                        <span className="text-slate-500 font-mono-code text-xs">--</span>
+                      )}
+                    </td>
+
                     {/* Retries */}
-                    <td className="py-3.5 px-4 text-center">
-                      <span className="inline-block px-2 py-0.5 rounded-full text-xs font-mono-code bg-slate-800/60 text-slate-300 border border-slate-700/40">
+                    <td className="py-3 px-4 text-center">
+                      <span className="inline-block px-2 py-0.5 rounded text-xs font-mono-code bg-panel-subtle text-slate-300 border border-panel-border">
                         {job.retries}
                       </span>
                     </td>
 
                     {/* Row Actions */}
-                    <td className="py-3.5 px-4 text-right" onClick={(e) => e.stopPropagation()}>
+                    <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="relative inline-block text-left">
                         <button
                           onClick={() => setActionMenuOpenId(isMenuOpen ? null : job.jobId)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                          className="p-1 rounded text-slate-400 hover:text-white hover:bg-panel-subtle transition-colors"
                         >
                           <MoreVertical className="w-4 h-4" />
                         </button>
 
                         {isMenuOpen && (
                           <>
-                            {/* Backdrop to close menu */}
                             <div
                               className="fixed inset-0 z-10"
                               onClick={() => setActionMenuOpenId(null)}
                             />
-                            <div className="absolute right-0 z-20 mt-1 w-44 rounded-xl bg-slate-900 border border-slate-700/80 shadow-2xl py-1 text-xs">
+                            <div className="absolute right-0 z-20 mt-1 w-44 rounded-lg bg-panel-surface border border-panel-border shadow-lg py-1 text-xs">
                               <button
                                 onClick={() => {
                                   setActionMenuOpenId(null);
                                   onViewJob(job);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-1.5 text-slate-300 hover:bg-panel-subtle hover:text-white transition-colors"
                               >
-                                <Eye className="w-3.5 h-3.5 text-indigo-400" />
-                                <span>View Details</span>
+                                <Eye className="w-3.5 h-3.5 text-slate-400" />
+                                <span>View Runs & History</span>
                               </button>
 
                               <button
@@ -319,9 +336,9 @@ export const JobTable: React.FC<JobTableProps> = ({
                                   setActionMenuOpenId(null);
                                   onEditJob(job);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-1.5 text-slate-300 hover:bg-panel-subtle hover:text-white transition-colors"
                               >
-                                <Edit3 className="w-3.5 h-3.5 text-amber-400" />
+                                <Edit3 className="w-3.5 h-3.5 text-slate-400" />
                                 <span>Edit Job</span>
                               </button>
 
@@ -330,7 +347,7 @@ export const JobTable: React.FC<JobTableProps> = ({
                                   setActionMenuOpenId(null);
                                   onTogglePause(job);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-1.5 text-slate-300 hover:bg-panel-subtle hover:text-white transition-colors"
                               >
                                 {job.status === 'PAUSED' ? (
                                   <>
@@ -339,20 +356,20 @@ export const JobTable: React.FC<JobTableProps> = ({
                                   </>
                                 ) : (
                                   <>
-                                    <Pause className="w-3.5 h-3.5 text-zinc-400" />
+                                    <Pause className="w-3.5 h-3.5 text-amber-400" />
                                     <span>Pause Job</span>
                                   </>
                                 )}
                               </button>
 
-                              <div className="h-px bg-slate-800 my-1" />
+                              <div className="h-px bg-panel-border my-1" />
 
                               <button
                                 onClick={() => {
                                   setActionMenuOpenId(null);
                                   onDeleteJob(job);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-rose-400 hover:bg-rose-500/10 transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-1.5 text-rose-400 hover:bg-rose-500/10 transition-colors"
                               >
                                 <Trash2 className="w-3.5 h-3.5 text-rose-400" />
                                 <span>Delete Job</span>
@@ -369,10 +386,11 @@ export const JobTable: React.FC<JobTableProps> = ({
           </tbody>
         </table>
       </div>
+
       {jobs.length > 0 && (
-        <div className="px-4 py-3 border-t border-slate-800/80 text-xs text-slate-500 flex items-center justify-between bg-slate-950/20">
+        <div className="px-4 py-2.5 border-t border-panel-border text-xs text-slate-400 flex items-center justify-between bg-panel-bg/30">
           <span>Showing {jobs.length} jobs</span>
-          <span className="font-mono-code text-[11px]">API Gateway Ready</span>
+          <span className="font-mono-code text-[11px] text-slate-400">ZenSys DJSP Gateway</span>
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Job, ScheduleType, JobStatus, CreateJobPayload, UpdateJobPayload } from '../types/job';
-import { X, Calendar, Clock, Repeat, AlertCircle, CheckCircle2, Code2, Sparkles, RefreshCw } from 'lucide-react';
+import { X, Calendar, Clock, Repeat, AlertCircle, CheckCircle2, Code2, RefreshCw } from 'lucide-react';
 import cronstrue from 'cronstrue';
 
 interface JobModalProps {
@@ -69,14 +69,12 @@ export const JobModal: React.FC<JobModalProps> = ({
   const [metaError, setMetaError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Initialize or reset form fields
   useEffect(() => {
     if (jobToEdit) {
       setName(jobToEdit.name);
       setScheduleType(jobToEdit.scheduleType);
       setCronExpression(jobToEdit.cronExpression || '0 0 12 * * ?');
       if (jobToEdit.scheduleTime) {
-        // Convert ISO to local datetime-local input string
         try {
           const d = new Date(jobToEdit.scheduleTime);
           const localISO = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
@@ -97,7 +95,6 @@ export const JobModal: React.FC<JobModalProps> = ({
       setName('');
       setScheduleType('CRON');
       setCronExpression('0 0 12 * * ?');
-      // Default future time (tomorrow 12:00)
       const tomorrow = new Date(Date.now() + 86400000);
       const localISO = new Date(tomorrow.getTime() - tomorrow.getTimezoneOffset() * 60000)
         .toISOString()
@@ -112,7 +109,6 @@ export const JobModal: React.FC<JobModalProps> = ({
     setMetaError(null);
   }, [jobToEdit, isOpen]);
 
-  // Translate cron expression
   useEffect(() => {
     if (scheduleType === 'CRON' || scheduleType === 'INTERVAL') {
       if (!cronExpression.trim()) {
@@ -126,7 +122,7 @@ export const JobModal: React.FC<JobModalProps> = ({
         setCronError(null);
       } catch (err: any) {
         setCronHumanized('');
-        setCronError(err?.message || 'Invalid cron format (use standard 5-part or 6-part cron)');
+        setCronError(err?.message || 'Invalid cron format');
       }
     } else {
       setCronHumanized('');
@@ -158,39 +154,36 @@ export const JobModal: React.FC<JobModalProps> = ({
     e.preventDefault();
     if (!name.trim()) return;
 
-    // Validate payload JSON
     try {
       JSON.parse(payload);
       setPayloadError(null);
     } catch (e: any) {
-      setPayloadError(`Invalid JSON payload: ${e.message}`);
+      setPayloadError(`Invalid JSON: ${e.message}`);
       return;
     }
 
-    // Validate meta JSON if provided
     if (meta.trim()) {
       try {
         JSON.parse(meta);
         setMetaError(null);
       } catch (e: any) {
-        setMetaError(`Invalid JSON meta: ${e.message}`);
+        setMetaError(`Invalid JSON: ${e.message}`);
         return;
       }
     }
 
-    // Validate schedule
     let finalScheduleTime: string | null = null;
     let finalCron: string | null = null;
 
     if (scheduleType === 'ONCE') {
       if (!scheduleTime) {
-        alert('Please select execution date and time for ONE-TIME job.');
+        alert('Please select date and time for ONE-TIME run.');
         return;
       }
       finalScheduleTime = new Date(scheduleTime).toISOString();
     } else {
       if (cronError || !cronExpression.trim()) {
-        alert('Please fix the cron expression before submitting.');
+        alert('Please fix cron expression.');
         return;
       }
       finalCron = cronExpression.trim();
@@ -233,35 +226,35 @@ export const JobModal: React.FC<JobModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
-      <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+      <div className="relative w-full max-w-2xl bg-panel-surface border border-panel-border rounded-xl shadow-2xl overflow-hidden animate-in fade-in duration-150">
         
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
+        <div className="px-6 py-4 border-b border-panel-border flex items-center justify-between bg-panel-bg/60">
           <div>
-            <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-              <span className="p-1.5 rounded-lg bg-brand-500/20 text-brand-400 border border-brand-500/30">
+            <h2 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
+              <span className="p-1 rounded bg-panel-subtle text-hostinger-400 border border-panel-border">
                 <Code2 className="w-4 h-4" />
               </span>
-              {isEdit ? 'Configure & Edit Job' : 'Schedule New Job'}
+              {isEdit ? 'Configure & Edit Job' : 'Schedule New Distributed Job'}
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              {isEdit ? `Modifying job ID ${jobToEdit?.jobId}` : 'Register a new distributed job with the ZenSys DJSP Gateway'}
+              {isEdit ? `Modifying job ID ${jobToEdit?.jobId}` : 'Register a new distributed execution schedule'}
             </p>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1 rounded text-slate-400 hover:text-white hover:bg-panel-subtle transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
           {/* Job Name */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
               Job Name <span className="text-rose-400">*</span>
             </label>
             <input
@@ -270,34 +263,34 @@ export const JobModal: React.FC<JobModalProps> = ({
               placeholder="e.g. Daily Payment Reconciliation, Hourly Cache Warmer"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700/80 rounded-lg text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-colors"
+              className="w-full px-3.5 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-hostinger-600 focus:ring-1 focus:ring-hostinger-600 transition-colors"
             />
           </div>
 
           {/* Schedule Type Selection */}
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
               Schedule Type
             </label>
-            <div className="grid grid-cols-3 gap-2 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+            <div className="grid grid-cols-3 gap-2 p-1 bg-panel-bg border border-panel-border rounded-lg">
               <button
                 type="button"
                 onClick={() => setScheduleType('CRON')}
-                className={`flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
+                className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                   scheduleType === 'CRON'
-                    ? 'bg-brand-600 text-white shadow-md shadow-brand-600/30'
+                    ? 'bg-hostinger-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 <Repeat className="w-3.5 h-3.5" />
-                CRON Schedule
+                CRON
               </button>
               <button
                 type="button"
                 onClick={() => setScheduleType('ONCE')}
-                className={`flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
+                className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                   scheduleType === 'ONCE'
-                    ? 'bg-brand-600 text-white shadow-md shadow-brand-600/30'
+                    ? 'bg-hostinger-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -307,9 +300,9 @@ export const JobModal: React.FC<JobModalProps> = ({
               <button
                 type="button"
                 onClick={() => setScheduleType('INTERVAL')}
-                className={`flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
+                className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                   scheduleType === 'INTERVAL'
-                    ? 'bg-brand-600 text-white shadow-md shadow-brand-600/30'
+                    ? 'bg-hostinger-600 text-white shadow-xs'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -321,7 +314,7 @@ export const JobModal: React.FC<JobModalProps> = ({
 
           {/* Schedule Configuration Detail */}
           {scheduleType === 'CRON' || scheduleType === 'INTERVAL' ? (
-            <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2.5">
+            <div className="p-3.5 rounded-lg bg-panel-bg border border-panel-border space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300">
                   Cron Expression (5 or 6 fields)
@@ -336,34 +329,34 @@ export const JobModal: React.FC<JobModalProps> = ({
                 placeholder="0 0 12 * * ?"
                 value={cronExpression}
                 onChange={(e) => setCronExpression(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700/80 rounded-lg text-sm text-slate-100 font-mono-code focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full px-3 py-1.5 bg-panel-surface border border-panel-border rounded-lg text-xs font-mono-code text-slate-100 focus:outline-none focus:border-hostinger-600 transition-colors"
               />
 
               {/* Humanized translation */}
               {cronHumanized && (
-                <div className="flex items-center gap-2 text-xs text-brand-300 bg-brand-500/10 px-3 py-2 rounded-lg border border-brand-500/20">
-                  <CheckCircle2 className="w-4 h-4 text-brand-400 shrink-0" />
+                <div className="flex items-center gap-2 text-xs text-hostinger-300 bg-hostinger-600/10 px-3 py-1.5 rounded-md border border-hostinger-600/20">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-hostinger-400 shrink-0" />
                   <span>Runs: <strong className="text-white">{cronHumanized}</strong></span>
                 </div>
               )}
 
               {cronError && (
-                <div className="flex items-center gap-2 text-xs text-rose-300 bg-rose-500/10 px-3 py-2 rounded-lg border border-rose-500/20">
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <div className="flex items-center gap-2 text-xs text-rose-300 bg-rose-500/10 px-3 py-1.5 rounded-md border border-rose-500/20">
+                  <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                   <span>{cronError}</span>
                 </div>
               )}
 
               {/* Quick Presets */}
               <div className="pt-1">
-                <span className="text-[11px] text-slate-500 block mb-1.5">Common Presets:</span>
+                <span className="text-[11px] text-slate-400 block mb-1">Common Presets:</span>
                 <div className="flex flex-wrap gap-1.5">
                   {CRON_PRESETS.map((preset) => (
                     <button
                       key={preset.label}
                       type="button"
                       onClick={() => setCronExpression(preset.cron)}
-                      className="px-2.5 py-1 text-xs rounded-md bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/50 transition-colors"
+                      className="px-2 py-0.5 text-xs rounded bg-panel-subtle hover:bg-panel-border text-slate-300 border border-panel-border transition-colors"
                     >
                       {preset.label}
                     </button>
@@ -372,7 +365,7 @@ export const JobModal: React.FC<JobModalProps> = ({
               </div>
             </div>
           ) : (
-            <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2">
+            <div className="p-3.5 rounded-lg bg-panel-bg border border-panel-border space-y-1.5">
               <label className="block text-xs font-semibold text-slate-300">
                 Scheduled Execution Date & Time
               </label>
@@ -381,10 +374,10 @@ export const JobModal: React.FC<JobModalProps> = ({
                 required
                 value={scheduleTime}
                 onChange={(e) => setScheduleTime(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-700/80 rounded-lg text-sm text-slate-100 focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full px-3 py-1.5 bg-panel-surface border border-panel-border rounded-lg text-xs text-slate-100 focus:outline-none focus:border-hostinger-600 transition-colors"
               />
               <p className="text-[11px] text-slate-500">
-                Will be dispatched once at this exact timestamp (converted to ISO-8601 UTC on submission).
+                Converted to ISO-8601 UTC upon scheduling.
               </p>
             </div>
           )}
@@ -392,13 +385,13 @@ export const JobModal: React.FC<JobModalProps> = ({
           {/* If Editing: Status Field */}
           {isEdit && (
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
                 Job Lifecycle Status
               </label>
               <select
                 value={status}
                 onChange={(e) => setStatus(e.target.value as JobStatus)}
-                className="w-full px-3.5 py-2 bg-slate-950 border border-slate-700/80 rounded-lg text-sm text-slate-100 focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full px-3 py-1.5 bg-panel-bg border border-panel-border rounded-lg text-xs text-slate-100 focus:outline-none focus:border-hostinger-600 transition-colors"
               >
                 <option value="SCHEDULED">SCHEDULED (Active)</option>
                 <option value="PAUSED">PAUSED (Suspended)</option>
@@ -413,26 +406,22 @@ export const JobModal: React.FC<JobModalProps> = ({
           {/* JSON Payload Editor */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <span>Execution Payload (JSON)</span>
                 <span className="text-rose-400">*</span>
               </label>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePrettifyPayload}
-                  className="text-[11px] px-2 py-0.5 rounded text-brand-300 bg-brand-500/10 hover:bg-brand-500/20 border border-brand-500/30 transition-colors"
-                >
-                  Format JSON
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={handlePrettifyPayload}
+                className="text-[11px] px-2 py-0.5 rounded text-hostinger-300 bg-hostinger-600/10 hover:bg-hostinger-600/20 border border-hostinger-600/30 transition-colors"
+              >
+                Format JSON
+              </button>
             </div>
 
             {/* Template shortcuts */}
             <div className="flex items-center gap-1.5 mb-2">
-              <span className="text-[11px] text-slate-500 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-amber-400" /> Templates:
-              </span>
+              <span className="text-[11px] text-slate-500">Templates:</span>
               {PAYLOAD_TEMPLATES.map((tmpl) => (
                 <button
                   key={tmpl.name}
@@ -441,7 +430,7 @@ export const JobModal: React.FC<JobModalProps> = ({
                     setPayload(tmpl.payload);
                     setPayloadError(null);
                   }}
-                  className="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white transition-colors"
+                  className="text-[11px] px-2 py-0.5 rounded bg-panel-bg text-slate-400 hover:text-white border border-panel-border transition-colors"
                 >
                   {tmpl.name}
                 </button>
@@ -449,14 +438,14 @@ export const JobModal: React.FC<JobModalProps> = ({
             </div>
 
             <textarea
-              rows={5}
+              rows={4}
               required
               value={payload}
               onChange={(e) => {
                 setPayload(e.target.value);
                 setPayloadError(null);
               }}
-              className="w-full p-3 bg-slate-950 border border-slate-700/80 rounded-lg text-xs font-mono-code text-indigo-200 focus:outline-none focus:border-brand-500 transition-colors"
+              className="w-full p-2.5 bg-panel-bg border border-panel-border rounded-lg text-xs font-mono-code text-slate-200 focus:outline-none focus:border-hostinger-600 transition-colors"
               placeholder='{\n  "key": "value"\n}'
             />
             {payloadError && (
@@ -467,37 +456,36 @@ export const JobModal: React.FC<JobModalProps> = ({
             )}
           </div>
 
-          {/* Resilience & Retries Stepper */}
+          {/* Resilience & Metadata */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
                 Max Retries on Failure
               </label>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5">
                 <input
                   type="number"
                   min={0}
                   max={10}
                   value={retries}
                   onChange={(e) => setRetries(parseInt(e.target.value) || 0)}
-                  className="w-24 px-3 py-2 bg-slate-950 border border-slate-700/80 rounded-lg text-sm text-slate-100 font-mono-code focus:outline-none focus:border-brand-500 transition-colors"
+                  className="w-20 px-3 py-1.5 bg-panel-bg border border-panel-border rounded-lg text-xs font-mono-code text-slate-100 focus:outline-none focus:border-hostinger-600 transition-colors"
                 />
-                <span className="text-xs text-slate-400">
-                  (0 - 10 retries before Dead Letter Queue)
+                <span className="text-[11px] text-slate-500">
+                  (0 - 10 retries before DLQ)
                 </span>
               </div>
             </div>
 
-            {/* Metadata / Tags */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                  Metadata & Tags (JSON)
+                <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Metadata (JSON)
                 </label>
                 <button
                   type="button"
                   onClick={handlePrettifyMeta}
-                  className="text-[11px] px-2 py-0.5 rounded text-slate-400 hover:text-white bg-slate-800 transition-colors"
+                  className="text-[11px] px-2 py-0.5 rounded text-slate-400 hover:text-white bg-panel-bg border border-panel-border transition-colors"
                 >
                   Format
                 </button>
@@ -509,7 +497,7 @@ export const JobModal: React.FC<JobModalProps> = ({
                   setMeta(e.target.value);
                   setMetaError(null);
                 }}
-                className="w-full p-2 bg-slate-950 border border-slate-700/80 rounded-lg text-xs font-mono-code text-slate-300 focus:outline-none focus:border-brand-500 transition-colors"
+                className="w-full p-2 bg-panel-bg border border-panel-border rounded-lg text-xs font-mono-code text-slate-300 focus:outline-none focus:border-hostinger-600 transition-colors"
                 placeholder='{"environment": "production"}'
               />
               {metaError && (
@@ -522,21 +510,21 @@ export const JobModal: React.FC<JobModalProps> = ({
           </div>
 
           {/* Footer Actions */}
-          <div className="pt-4 border-t border-slate-800 flex items-center justify-end gap-3">
+          <div className="pt-3 border-t border-panel-border flex items-center justify-end gap-2.5">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              className="px-3.5 py-1.5 text-xs font-medium text-slate-400 hover:text-white rounded-lg hover:bg-panel-subtle transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={isSubmitting || !!cronError}
-              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 text-white font-medium text-xs hover:from-brand-500 hover:to-indigo-500 transition-all shadow-md shadow-brand-500/25 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-hostinger-600 hover:bg-hostinger-700 text-white font-medium text-xs transition-colors shadow-xs disabled:opacity-50"
             >
               {isSubmitting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-              <span>{isEdit ? 'Save Changes' : 'Create & Schedule Job'}</span>
+              <span>{isEdit ? 'Save Changes' : 'Schedule Job'}</span>
             </button>
           </div>
         </form>

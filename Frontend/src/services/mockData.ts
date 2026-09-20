@@ -1,9 +1,9 @@
-import { Job } from '../types/job';
+import { Job, JobRun } from '../types/job';
 
 export const INITIAL_MOCK_JOBS: Job[] = [
   {
     jobId: '01J82N4XYZ0000000000000001',
-    name: 'Production Database Backup Pipeline',
+    name: 'Database Backup Pipeline',
     scheduleType: 'CRON',
     status: 'SCHEDULED',
     scheduleTime: null,
@@ -22,6 +22,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: new Date(Date.now() + 1000 * 60 * 60 * 5).toISOString(),
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
+    lastRunStatus: 'SUCCESS',
   },
   {
     jobId: '01J82N4XYZ0000000000000002',
@@ -44,6 +45,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: null,
     lastPolledTime: new Date().toISOString(),
+    lastRunStatus: 'RUNNING',
   },
   {
     jobId: '01J82N4XYZ0000000000000003',
@@ -64,6 +66,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: new Date(Date.now() + 1000 * 60 * 22).toISOString(),
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 38).toISOString(),
+    lastRunStatus: 'SUCCESS',
   },
   {
     jobId: '01J82N4XYZ0000000000000004',
@@ -84,6 +87,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: new Date(Date.now() + 1000 * 60 * 60 * 10).toISOString(),
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
+    lastRunStatus: 'SUCCESS',
   },
   {
     jobId: '01J82N4XYZ0000000000000005',
@@ -103,6 +107,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: null,
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+    lastRunStatus: 'CANCELLED',
   },
   {
     jobId: '01J82N4XYZ0000000000000006',
@@ -114,7 +119,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     payload: JSON.stringify({
       crmHost: 'https://crm-legacy.internal.lan',
       authMethod: 'oauth2_refresh',
-      lastFailureReason: 'Connection timed out after 3 retries (504 Gateway Timeout)'
+      lastFailureReason: 'Max retries exhausted; sent to DLQ'
     }, null, 2),
     retries: 3,
     meta: JSON.stringify({
@@ -123,6 +128,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: null,
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
+    lastRunStatus: 'FAILED',
   },
   {
     jobId: '01J82N4XYZ0000000000000007',
@@ -141,5 +147,113 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     nextRunTime: null,
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
+    lastRunStatus: 'CANCELLED',
+  }
+];
+
+export const INITIAL_MOCK_RUNS: JobRun[] = [
+  {
+    id: 104,
+    runId: '01J82NRUN00000000000000001',
+    jobId: '01J82N4XYZ0000000000000001',
+    status: 'SUCCESS',
+    startTime: '2026-09-20T02:00:00.100Z',
+    endTime: '2026-09-20T02:00:04.350Z',
+    modificationTime: '2026-09-20T02:00:04.352Z',
+    executorId: 'executor-pod-us-east-4a',
+    attemptNumber: 1,
+    executionTimeMs: 4250,
+    errorMsg: null
+  },
+  {
+    id: 103,
+    runId: '01J82NRUN00000000000000002',
+    jobId: '01J82N4XYZ0000000000000001',
+    status: 'FAILED',
+    startTime: '2026-09-19T02:00:00.080Z',
+    endTime: '2026-09-19T02:00:01.200Z',
+    modificationTime: '2026-09-19T02:00:01.202Z',
+    executorId: 'executor-pod-us-east-2b',
+    attemptNumber: 1,
+    executionTimeMs: 1120,
+    errorMsg: 'S3BucketNotFoundException: Bucket \'backups\' was not reachable\n  at com.zensys.storage.S3Client.connect(S3Client.java:142)\n  at com.zensys.worker.BackupTask.execute(BackupTask.java:55)'
+  },
+  {
+    id: 102,
+    runId: '01J82NRUN00000000000000003',
+    jobId: '01J82N4XYZ0000000000000002',
+    status: 'RUNNING',
+    startTime: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+    endTime: null,
+    modificationTime: new Date().toISOString(),
+    executorId: 'executor-pod-worker-08',
+    attemptNumber: 1,
+    executionTimeMs: 1800000,
+    errorMsg: null
+  },
+  {
+    id: 101,
+    runId: '01J82NRUN00000000000000004',
+    jobId: '01J82N4XYZ0000000000000003',
+    status: 'SUCCESS',
+    startTime: new Date(Date.now() - 1000 * 60 * 38).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 37).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 37).toISOString(),
+    executorId: 'executor-pod-us-west-1',
+    attemptNumber: 1,
+    executionTimeMs: 380,
+    errorMsg: null
+  },
+  {
+    id: 100,
+    runId: '01J82NRUN00000000000000005',
+    jobId: '01J82N4XYZ0000000000000004',
+    status: 'SUCCESS',
+    startTime: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 88).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 88).toISOString(),
+    executorId: 'executor-fin-secure-02',
+    attemptNumber: 1,
+    executionTimeMs: 12400,
+    errorMsg: null
+  },
+  {
+    id: 99,
+    runId: '01J82NRUN00000000000000006',
+    jobId: '01J82N4XYZ0000000000000006',
+    status: 'FAILED',
+    startTime: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 11).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 11).toISOString(),
+    executorId: 'executor-crm-legacy-01',
+    attemptNumber: 3,
+    executionTimeMs: 2450,
+    errorMsg: 'SocketTimeoutException: Read timed out after 2000ms connecting to https://crm-legacy.internal.lan\n  at java.net.SocketInputStream.socketRead0(Native Method)\n  at com.zensys.worker.CrmWorker.syncBatch(CrmWorker.java:189)'
+  },
+  {
+    id: 98,
+    runId: '01J82NRUN00000000000000007',
+    jobId: '01J82N4XYZ0000000000000006',
+    status: 'TIMEOUT',
+    startTime: new Date(Date.now() - 1000 * 60 * 22).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
+    executorId: 'executor-crm-legacy-01',
+    attemptNumber: 2,
+    executionTimeMs: 120000,
+    errorMsg: 'JobExecutionTimeoutException: Run duration exceeded configured threshold of 120000ms'
+  },
+  {
+    id: 97,
+    runId: '01J82NRUN00000000000000008',
+    jobId: '01J82N4XYZ0000000000000006',
+    status: 'EXECUTOR_DIED',
+    startTime: new Date(Date.now() - 1000 * 60 * 32).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 31).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 31).toISOString(),
+    executorId: 'executor-crm-legacy-03',
+    attemptNumber: 1,
+    executionTimeMs: 15400,
+    errorMsg: 'HeartbeatLostException: Worker pod terminated unexpectedly (OOMKilled exit code 137)'
   }
 ];

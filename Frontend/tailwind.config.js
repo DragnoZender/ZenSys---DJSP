@@ -8,31 +8,27 @@ export default {
   theme: {
     extend: {
       colors: {
-        brand: {
-          50: '#eef2ff',
-          100: '#e0e7ff',
-          200: '#c7d2fe',
-          300: '#a5b4fc',
-          400: '#818cf8',
-          500: '#6366f1',
-          600: '#4f46e5',
-          700: '#4338ca',
-          800: '#3730a3',
-          900: '#312e81',
-          950: '#1e1b4b',
+        hostinger: {
+          50: '#f4f0ff',
+          100: '#ece3ff',
+          200: '#dbc8ff',
+          300: '#c39eff',
+          400: '#a66aff',
+          500: '#893bff',
+          600: '#673de6', // Hostinger signature violet
+          700: '#5631c7',
+          800: '#4727a6',
+          900: '#3a2084',
+          950: '#231159',
         },
-        surface: {
-          50: '#f8fafc',
-          100: '#f1f5f9',
-          800: '#111622',
-          850: '#0d121c',
-          900: '#090d16',
-          950: '#05070d',
+        panel: {
+          bg: '#0c0e15',       // Clean deep enterprise canvas
+          surface: '#131622',  // Card / panel container
+          subtle: '#191d2c',   // Secondary surface / inputs
+          border: '#232838',   // Crisp 1px divider
+          muted: '#2c3246',    // Accent border
         }
       },
-      animation: {
-        'pulse-subtle': 'pulse 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-      }
     },
   },
   plugins: [],

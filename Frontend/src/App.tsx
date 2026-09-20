@@ -1,16 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Job, JobStatus, ScheduleType, CreateJobPayload, UpdateJobPayload, SystemHealth } from './types/job';
+import { Job, JobRun, JobStatus, ScheduleType, JobRunStatus, CreateJobPayload, UpdateJobPayload, SystemHealth } from './types/job';
 import { apiService } from './services/api';
 import { Header } from './components/Header';
 import { MetricCards } from './components/MetricCards';
 import { JobTable } from './components/JobTable';
+import { GlobalRunsTable } from './components/GlobalRunsTable';
 import { JobModal } from './components/JobModal';
 import { JobDetailDrawer } from './components/JobDetailDrawer';
 import { ToastContainer, ToastMessage } from './components/Toast';
-import { Info, Sparkles, RefreshCw, Zap } from 'lucide-react';
+import { Info, RefreshCw, Layers, Activity } from 'lucide-react';
 
 export function App() {
+  const [activeTab, setActiveTab] = useState<'jobs' | 'runs'>('jobs');
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [runs, setRuns] = useState<JobRun[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -22,10 +25,14 @@ export function App() {
     lastChecked: '',
   });
 
-  // Filter and Search States
+  // Jobs Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<JobStatus | 'ALL'>('ALL');
   const [typeFilter, setTypeFilter] = useState<ScheduleType | 'ALL'>('ALL');
+
+  // Runs Filters
+  const [runsSearchQuery, setRunsSearchQuery] = useState('');
+  const [runsStatusFilter, setRunsStatusFilter] = useState<JobRunStatus | 'ALL'>('ALL');
 
   // Modal and Drawer States
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -51,19 +58,22 @@ export function App() {
   const loadData = useCallback(async (isSilent = false) => {
     if (!isSilent) setIsRefreshing(true);
     try {
-      const [healthData, jobsData] = await Promise.all([
+      const [healthData, jobsData, runsData] = await Promise.all([
         apiService.checkHealth(),
-        apiService.getJobs(),
+        apiService.getJobs(statusFilter, typeFilter),
+        apiService.getAllRuns(runsStatusFilter),
       ]);
+
       const isMockActive = jobsData.isMock || healthData.isMockMode;
       setHealth({
         ...healthData,
         status: isMockActive ? 'DOWN' : 'UP',
         isMockMode: isMockActive,
       });
-      setJobs(jobsData.jobs);
 
-      // If we are currently viewing a job, refresh its details
+      setJobs(jobsData.jobs);
+      setRuns(runsData.runs);
+
       if (viewingJob) {
         const updatedViewing = jobsData.jobs.find((j) => j.jobId === viewingJob.jobId);
         if (updatedViewing) setViewingJob(updatedViewing);
@@ -74,26 +84,23 @@ export function App() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [viewingJob]);
+  }, [viewingJob, statusFilter, typeFilter, runsStatusFilter]);
 
   // Initial fetch
   useEffect(() => {
     loadData();
-  }, []);
+  }, [loadData]);
 
-  // Auto-polling effect (every 10 seconds)
+  // Auto-polling (every 10 seconds)
   useEffect(() => {
     if (!autoRefresh) return;
-
     const interval = setInterval(() => {
-      // Background silent refetch
       loadData(true);
     }, 10000);
-
     return () => clearInterval(interval);
   }, [autoRefresh, loadData]);
 
-  // Action Handlers
+  // Actions
   const handleSaveJob = async (
     payload: CreateJobPayload | UpdateJobPayload,
     isEdit: boolean,
@@ -103,14 +110,14 @@ export function App() {
       const res = await apiService.updateJob(jobId, payload as UpdateJobPayload);
       addToast(
         'success',
-        'Job Updated Successfully',
+        'Job Updated',
         res.isMock ? `Simulated update for ${payload.name}` : `Updated on Gateway: ${jobId}`
       );
     } else {
       const res = await apiService.createJob(payload as CreateJobPayload);
       addToast(
         'success',
-        'Job Scheduled Successfully',
+        'Job Scheduled',
         `Assigned ID: ${res.jobId} ${res.isMock ? '(Demo Mode)' : ''}`
       );
     }
@@ -148,12 +155,18 @@ export function App() {
     }
   };
 
-  const handleTriggerRunNow = (job: Job) => {
-    addToast(
-      'info',
-      'Execution Dispatched',
-      `Trigger signal queued for ${job.name} (ID: ${job.jobId})`
-    );
+  const handleTriggerRunNow = async (job: Job) => {
+    try {
+      const res = await apiService.triggerJobRunNow(job);
+      addToast(
+        'info',
+        'Execution Dispatched',
+        `Queued run ${res.run.runId} for ${job.name}`
+      );
+      await loadData(true);
+    } catch (err: any) {
+      addToast('error', 'Trigger Failed', err.message);
+    }
   };
 
   const handleToggleForceMock = () => {
@@ -161,7 +174,7 @@ export function App() {
     apiService.setForceMock(!current);
     addToast(
       'info',
-      !current ? 'Switched to Demo Mock Mode' : 'Switched to Live Gateway Mode',
+      !current ? 'Switched to Demo Mode' : 'Switched to Live Gateway Mode',
       !current ? 'All changes will persist locally' : 'Attempting to query http://localhost:8080'
     );
     loadData();
@@ -169,21 +182,22 @@ export function App() {
 
   const handleResetMockJobs = () => {
     apiService.resetMockData();
-    addToast('info', 'Demo Data Reset', 'Restored original sample jobs');
+    addToast('info', 'Demo Data Reset', 'Restored default sample jobs and runs');
     loadData();
   };
 
-  // Filter logic
+  const handleJumpToJobFromRun = (jobId: string) => {
+    const found = jobs.find((j) => j.jobId === jobId);
+    if (found) {
+      setActiveTab('jobs');
+      setViewingJob(found);
+    } else {
+      addToast('info', 'Job Not Found', `Job ID ${jobId} not in local list`);
+    }
+  };
+
+  // Client search filter for jobs
   const filteredJobs = jobs.filter((job) => {
-    // Status filter
-    if (statusFilter !== 'ALL' && job.status !== statusFilter) {
-      return false;
-    }
-    // Type filter
-    if (typeFilter !== 'ALL' && job.scheduleType !== typeFilter) {
-      return false;
-    }
-    // Search query
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
       const matchName = job.name.toLowerCase().includes(query);
@@ -195,9 +209,11 @@ export function App() {
   });
 
   return (
-    <div className="min-h-screen bg-[#080c14] text-slate-100 flex flex-col selection:bg-brand-500/30 selection:text-brand-200">
+    <div className="min-h-screen bg-panel-bg text-slate-100 flex flex-col">
       {/* Top Navigation */}
       <Header
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
         health={health}
         isRefreshing={isRefreshing}
         autoRefresh={autoRefresh}
@@ -213,22 +229,24 @@ export function App() {
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
         
-        {/* Offline / Demo Notice Banner if Gateway is down */}
+        {/* Gateway Offline Banner (Hostinger Clean Style) */}
         {health.isMockMode && (
-          <div className="mb-6 p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 backdrop-blur-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in duration-300">
+          <div className="mb-6 p-3.5 rounded-xl border border-panel-border bg-panel-surface flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                <Info className="w-5 h-5" />
+              <div className="p-2 rounded-lg bg-panel-subtle text-amber-400 border border-panel-border">
+                <Info className="w-4 h-4" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <span>Demo Mode Active</span>
-                  <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-bold text-white">
+                    Demo Mode Active
+                  </h3>
+                  <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
                     Offline Resilient
                   </span>
-                </h3>
-                <p className="text-xs text-amber-200/80 mt-0.5">
-                  The API Gateway at <code className="text-amber-100 font-mono-code font-semibold">{health.gatewayUrl}</code> is currently offline. You can test all job operations locally with full persistence.
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Gateway at <code className="text-slate-300 font-mono-code">{health.gatewayUrl}</code> is offline. Operations persist in browser storage.
                 </p>
               </div>
             </div>
@@ -236,13 +254,13 @@ export function App() {
             <div className="flex items-center gap-2 self-end sm:self-center">
               <button
                 onClick={handleResetMockJobs}
-                className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900/80 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-colors"
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-panel-subtle hover:bg-panel-border text-slate-300 border border-panel-border transition-colors"
               >
-                Reset Demo Jobs
+                Reset Demo Data
               </button>
               <button
                 onClick={() => loadData()}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-500 text-white shadow-sm transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-hostinger-600 hover:bg-hostinger-700 text-white transition-colors"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Retry Gateway</span>
@@ -251,43 +269,58 @@ export function App() {
           </div>
         )}
 
-        {/* Metric Cards Overview */}
+        {/* Top Metric Cards */}
         <MetricCards
           jobs={jobs}
+          runs={runs}
           activeStatusFilter={statusFilter}
-          onSelectFilter={(status) => setStatusFilter(status)}
+          onSelectFilter={(status) => {
+            setActiveTab('jobs');
+            setStatusFilter(status);
+          }}
         />
 
-        {/* Dashboard Title & Quick Stats */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="text-xl font-extrabold tracking-tight text-white flex items-center gap-2">
-              <span>Scheduled Operations</span>
-              <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700">
-                {filteredJobs.length} {filteredJobs.length === 1 ? 'Job' : 'Jobs'}
-              </span>
-            </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Inspect schedules, manage lifecycle states, and monitor real-time worker dispatch.
-            </p>
-          </div>
-
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
-            <span className="flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-400" /> Gateway: Spring Cloud
-            </span>
+        {/* Tab Content Header */}
+        <div className="flex items-center justify-between mb-3.5">
+          <div className="flex items-center gap-2.5">
+            {activeTab === 'jobs' ? (
+              <>
+                <Layers className="w-5 h-5 text-hostinger-400" />
+                <div>
+                  <h1 className="text-base font-bold text-white tracking-tight">
+                    Scheduled Jobs ({filteredJobs.length})
+                  </h1>
+                  <p className="text-xs text-slate-400">
+                    Manage distributed schedules, operational triggers, and payload parameters.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <Activity className="w-5 h-5 text-hostinger-400" />
+                <div>
+                  <h1 className="text-base font-bold text-white tracking-tight">
+                    Global Execution Runs ({runs.length})
+                  </h1>
+                  <p className="text-xs text-slate-400">
+                    Monitor system-wide worker runs, diagnose pod errors, and inspect stack traces.
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Interactive Jobs Table */}
+        {/* Active Tab View */}
         {isLoading ? (
-          <div className="p-16 rounded-xl border border-slate-800/80 glass-panel flex flex-col items-center justify-center gap-3">
-            <RefreshCw className="w-8 h-8 text-brand-400 animate-spin" />
-            <span className="text-sm font-medium text-slate-400">Connecting to ZenSys Gateway...</span>
+          <div className="p-16 rounded-xl border border-panel-border bg-panel-surface flex flex-col items-center justify-center gap-2.5">
+            <RefreshCw className="w-6 h-6 text-hostinger-400 animate-spin" />
+            <span className="text-xs font-medium text-slate-400">Connecting to ZenSys DJSP Gateway...</span>
           </div>
-        ) : (
+        ) : activeTab === 'jobs' ? (
           <JobTable
             jobs={filteredJobs}
+            runs={runs}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             statusFilter={statusFilter}
@@ -303,6 +336,15 @@ export function App() {
             onDeleteJob={handleDeleteJob}
             onCopyId={(id) => addToast('info', 'Copied to Clipboard', id)}
           />
+        ) : (
+          <GlobalRunsTable
+            runs={runs}
+            statusFilter={runsStatusFilter}
+            onStatusFilterChange={setRunsStatusFilter}
+            searchQuery={runsSearchQuery}
+            onSearchChange={setRunsSearchQuery}
+            onSelectJob={handleJumpToJobFromRun}
+          />
         )}
       </main>
 
@@ -317,7 +359,7 @@ export function App() {
         onSave={handleSaveJob}
       />
 
-      {/* Job Detail Slide-over Drawer */}
+      {/* Job Detail & Run History Drawer */}
       <JobDetailDrawer
         job={viewingJob}
         isOpen={!!viewingJob}
@@ -332,19 +374,16 @@ export function App() {
         onTriggerNow={handleTriggerRunNow}
       />
 
-      {/* Action Feedback Toasts */}
+      {/* Toasts */}
       <ToastContainer toasts={toasts} onDismiss={removeToast} />
 
-      {/* Footer */}
-      <footer className="mt-auto border-t border-slate-800/80 py-4 bg-[#05070d]/80 text-xs text-slate-500">
+      {/* Clean Footer */}
+      <footer className="mt-auto border-t border-panel-border py-4 bg-panel-bg text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-3.5 h-3.5 text-brand-400" />
-            <span>ZenSys DJSP Operations Dashboard</span>
-          </div>
+          <span>ZenSys DJSP &bull; Enterprise Operations Dashboard</span>
           <div className="flex items-center gap-4 text-[11px]">
-            <span>Base Gateway: <code className="text-slate-400">{health.gatewayUrl}</code></span>
-            <span>Last Sync: {health.lastChecked || 'Just now'}</span>
+            <span>Gateway: <code className="text-slate-400">{health.gatewayUrl}</code></span>
+            <span>Last Polled: {health.lastChecked || 'Just now'}</span>
           </div>
         </div>
       </footer>

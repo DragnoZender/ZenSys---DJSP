@@ -1,19 +1,20 @@
-import { Job, CreateJobPayload, UpdateJobPayload, SystemHealth } from '../types/job';
-import { INITIAL_MOCK_JOBS } from './mockData';
+import { Job, JobRun, JobStatus, ScheduleType, JobRunStatus, CreateJobPayload, UpdateJobPayload, SystemHealth } from '../types/job';
+import { INITIAL_MOCK_JOBS, INITIAL_MOCK_RUNS } from './mockData';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-const STORAGE_KEY = 'zensys_djsp_mock_jobs_v1';
+const JOBS_STORAGE_KEY = 'zensys_djsp_mock_jobs_v2';
+const RUNS_STORAGE_KEY = 'zensys_djsp_mock_runs_v2';
 const FORCE_MOCK_KEY = 'zensys_djsp_force_mock';
 
-// Initialize mock store in localStorage if empty
+// Local Mock Stores
 function getLocalMockJobs(): Job[] {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = localStorage.getItem(JOBS_STORAGE_KEY);
     if (stored) {
       return JSON.parse(stored);
     }
   } catch (e) {
-    console.warn('Could not read from localStorage:', e);
+    console.info('Using initial mock jobs:', e);
   }
   saveLocalMockJobs(INITIAL_MOCK_JOBS);
   return INITIAL_MOCK_JOBS;
@@ -21,9 +22,30 @@ function getLocalMockJobs(): Job[] {
 
 function saveLocalMockJobs(jobs: Job[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
+    localStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(jobs));
   } catch (e) {
-    console.warn('Could not write to localStorage:', e);
+    console.warn('Could not save jobs to localStorage:', e);
+  }
+}
+
+function getLocalMockRuns(): JobRun[] {
+  try {
+    const stored = localStorage.getItem(RUNS_STORAGE_KEY);
+    if (stored) {
+      return JSON.parse(stored);
+    }
+  } catch (e) {
+    console.info('Using initial mock runs:', e);
+  }
+  saveLocalMockRuns(INITIAL_MOCK_RUNS);
+  return INITIAL_MOCK_RUNS;
+}
+
+function saveLocalMockRuns(runs: JobRun[]) {
+  try {
+    localStorage.setItem(RUNS_STORAGE_KEY, JSON.stringify(runs));
+  } catch (e) {
+    console.warn('Could not save runs to localStorage:', e);
   }
 }
 
@@ -36,9 +58,10 @@ export const apiService = {
     localStorage.setItem(FORCE_MOCK_KEY, forced ? 'true' : 'false');
   },
 
-  resetMockData(): Job[] {
+  resetMockData() {
     saveLocalMockJobs(INITIAL_MOCK_JOBS);
-    return INITIAL_MOCK_JOBS;
+    saveLocalMockRuns(INITIAL_MOCK_RUNS);
+    return { jobs: INITIAL_MOCK_JOBS, runs: INITIAL_MOCK_RUNS };
   },
 
   async checkHealth(): Promise<SystemHealth> {
@@ -66,12 +89,12 @@ export const apiService = {
         return {
           status: data.status === 'UP' ? 'UP' : 'DOWN',
           gatewayUrl: BASE_URL || 'http://localhost:8080',
-          isMockMode: false,
+          isMockMode: data.status !== 'UP',
           lastChecked: new Date().toLocaleTimeString(),
         };
       }
     } catch {
-      // Gateway unreachable
+      // Gateway down
     }
 
     return {
@@ -82,13 +105,18 @@ export const apiService = {
     };
   },
 
-  async getJobs(): Promise<{ jobs: Job[]; isMock: boolean }> {
+  async getJobs(status?: JobStatus | 'ALL', scheduleType?: ScheduleType | 'ALL'): Promise<{ jobs: Job[]; isMock: boolean }> {
     const isForced = this.getForceMock();
     if (!isForced) {
       try {
+        const params = new URLSearchParams();
+        if (status && status !== 'ALL') params.set('status', status);
+        if (scheduleType && scheduleType !== 'ALL') params.set('scheduleType', scheduleType);
+
+        const url = `${BASE_URL}/jobs${params.toString() ? `?${params.toString()}` : ''}`;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 2500);
-        const res = await fetch(`${BASE_URL}/jobs`, {
+        const res = await fetch(url, {
           signal: controller.signal,
           headers: { Accept: 'application/json' },
         });
@@ -98,12 +126,19 @@ export const apiService = {
           const jobs: Job[] = await res.json();
           return { jobs, isMock: false };
         }
-      } catch (err) {
-        console.warn('Real gateway fetch failed, falling back to mock mode:', err);
+      } catch {
+        // Fall back to mock
       }
     }
 
-    return { jobs: getLocalMockJobs(), isMock: true };
+    let jobs = getLocalMockJobs();
+    if (status && status !== 'ALL') {
+      jobs = jobs.filter(j => j.status === status);
+    }
+    if (scheduleType && scheduleType !== 'ALL') {
+      jobs = jobs.filter(j => j.scheduleType === scheduleType);
+    }
+    return { jobs, isMock: true };
   },
 
   async getJobById(jobId: string): Promise<Job> {
@@ -114,17 +149,75 @@ export const apiService = {
         if (res.ok) {
           return await res.json();
         }
-      } catch (err) {
-        console.warn('Real gateway getJobById failed, checking mock:', err);
+      } catch {
+        // Fall back
       }
     }
 
     const jobs = getLocalMockJobs();
     const found = jobs.find((j) => j.jobId === jobId);
-    if (!found) {
-      throw new Error(`Job with ID ${jobId} not found`);
-    }
+    if (!found) throw new Error(`Job with ID ${jobId} not found`);
     return found;
+  },
+
+  async getJobRuns(jobId: string): Promise<{ runs: JobRun[]; isMock: boolean }> {
+    const isForced = this.getForceMock();
+    if (!isForced) {
+      try {
+        const res = await fetch(`${BASE_URL}/jobs/${encodeURIComponent(jobId)}/runs`);
+        if (res.ok) {
+          const runs: JobRun[] = await res.json();
+          return { runs, isMock: false };
+        }
+      } catch {
+        // Fall back
+      }
+    }
+
+    const allRuns = getLocalMockRuns();
+    const runsForJob = allRuns.filter(r => r.jobId === jobId);
+    return { runs: runsForJob, isMock: true };
+  },
+
+  async getRunById(runId: string): Promise<JobRun> {
+    const isForced = this.getForceMock();
+    if (!isForced) {
+      try {
+        const res = await fetch(`${BASE_URL}/jobs/runs/${encodeURIComponent(runId)}`);
+        if (res.ok) {
+          return await res.json();
+        }
+      } catch {
+        // Fall back
+      }
+    }
+
+    const allRuns = getLocalMockRuns();
+    const run = allRuns.find(r => r.runId === runId);
+    if (!run) throw new Error(`Run ${runId} not found`);
+    return run;
+  },
+
+  async getAllRuns(statusFilter?: JobRunStatus | 'ALL'): Promise<{ runs: JobRun[]; isMock: boolean }> {
+    const isForced = this.getForceMock();
+    if (!isForced) {
+      try {
+        const query = statusFilter && statusFilter !== 'ALL' ? `?status=${statusFilter}` : '';
+        const res = await fetch(`${BASE_URL}/jobs/runs${query}`);
+        if (res.ok) {
+          const runs: JobRun[] = await res.json();
+          return { runs, isMock: false };
+        }
+      } catch {
+        // Fall back
+      }
+    }
+
+    let allRuns = getLocalMockRuns();
+    if (statusFilter && statusFilter !== 'ALL') {
+      allRuns = allRuns.filter(r => r.status === statusFilter);
+    }
+    return { runs: allRuns, isMock: true };
   },
 
   async createJob(payload: CreateJobPayload): Promise<{ jobId: string; isMock: boolean }> {
@@ -139,21 +232,20 @@ export const apiService = {
         if (res.ok) {
           const text = await res.text();
           let jobId = text.replace(/["\r\n]/g, '').trim();
-          // If response was JSON with jobId field
           try {
             const parsed = JSON.parse(text);
             if (parsed.jobId) jobId = parsed.jobId;
           } catch {
-            // response was plain string
+            // raw string
           }
           return { jobId, isMock: false };
         }
-      } catch (err) {
-        console.warn('Create job real API failed, saving to mock store:', err);
+      } catch {
+        // Fall back
       }
     }
 
-    // Mock store implementation
+    // Mock store creation
     const randomSuffix = Math.random().toString(36).substring(2, 10).toUpperCase();
     const newJobId = `01J8${Date.now().toString(36).toUpperCase()}${randomSuffix}`.padEnd(26, '0');
 
@@ -178,6 +270,7 @@ export const apiService = {
       meta: payload.meta,
       nextRunTime: calculatedNextRun,
       lastPolledTime: null,
+      lastRunStatus: undefined,
     };
 
     const currentJobs = getLocalMockJobs();
@@ -197,8 +290,8 @@ export const apiService = {
         if (res.ok) {
           return { success: true, isMock: false };
         }
-      } catch (err) {
-        console.warn('Update job real API failed, saving to mock store:', err);
+      } catch {
+        // Fall back
       }
     }
 
@@ -234,15 +327,35 @@ export const apiService = {
         if (res.ok) {
           return { success: true, isMock: false };
         }
-      } catch (err) {
-        console.warn('Delete job real API failed, deleting in mock store:', err);
+      } catch {
+        // Fall back
       }
     }
 
     const currentJobs = getLocalMockJobs();
-    const filtered = currentJobs.filter((j) => j.jobId !== jobId);
-    saveLocalMockJobs(filtered);
+    saveLocalMockJobs(currentJobs.filter((j) => j.jobId !== jobId));
     return { success: true, isMock: true };
+  },
+
+  async triggerJobRunNow(job: Job): Promise<{ run: JobRun; isMock: boolean }> {
+    const newRunId = `01J8RUN${Date.now().toString(36).toUpperCase()}`.padEnd(26, '0');
+    const newRun: JobRun = {
+      id: Math.floor(Math.random() * 1000) + 200,
+      runId: newRunId,
+      jobId: job.jobId,
+      status: 'RUNNING',
+      startTime: new Date().toISOString(),
+      endTime: null,
+      modificationTime: new Date().toISOString(),
+      executorId: `executor-worker-${Math.floor(Math.random() * 10) + 1}`,
+      attemptNumber: 1,
+      executionTimeMs: 0,
+      errorMsg: null,
+    };
+
+    const currentRuns = getLocalMockRuns();
+    saveLocalMockRuns([newRun, ...currentRuns]);
+    return { run: newRun, isMock: true };
   },
 
   async toggleJobPause(job: Job): Promise<{ status: Job['status']; isMock: boolean }> {
