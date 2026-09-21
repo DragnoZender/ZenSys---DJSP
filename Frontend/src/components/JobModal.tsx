@@ -46,6 +46,15 @@ const PAYLOAD_TEMPLATES = [
   }
 ];
 
+const INTERVAL_PRESETS = [
+  { label: '30s', seconds: 30 },
+  { label: '1 min (60s)', seconds: 60 },
+  { label: '5 mins (300s)', seconds: 300 },
+  { label: '15 mins (900s)', seconds: 900 },
+  { label: '1 hr (3600s)', seconds: 3600 },
+  { label: '24 hrs (86400s)', seconds: 86400 },
+];
+
 export const JobModal: React.FC<JobModalProps> = ({
   isOpen,
   onClose,
@@ -57,6 +66,7 @@ export const JobModal: React.FC<JobModalProps> = ({
   const [name, setName] = useState('');
   const [scheduleType, setScheduleType] = useState<ScheduleType>('CRON');
   const [cronExpression, setCronExpression] = useState('0 0 12 * * ?');
+  const [intervalSeconds, setIntervalSeconds] = useState(300);
   const [scheduleTime, setScheduleTime] = useState('');
   const [status, setStatus] = useState<JobStatus>('SCHEDULED');
   const [retries, setRetries] = useState(3);
@@ -67,6 +77,7 @@ export const JobModal: React.FC<JobModalProps> = ({
   const [cronError, setCronError] = useState<string | null>(null);
   const [payloadError, setPayloadError] = useState<string | null>(null);
   const [metaError, setMetaError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
@@ -91,10 +102,24 @@ export const JobModal: React.FC<JobModalProps> = ({
       setRetries(jobToEdit.retries);
       setPayload(jobToEdit.payload || '{}');
       setMeta(jobToEdit.meta || '{}');
+
+      let parsedInterval = 300;
+      if (jobToEdit.meta) {
+        try {
+          const m = JSON.parse(jobToEdit.meta);
+          if (m.intervalSeconds) parsedInterval = Number(m.intervalSeconds);
+          else if (m.interval) parsedInterval = Number(m.interval);
+        } catch {
+          const match = jobToEdit.meta.match(/"intervalSeconds"\s*:\s*(\d+)/) || jobToEdit.meta.match(/"interval"\s*:\s*(\d+)/);
+          if (match) parsedInterval = Number(match[1]);
+        }
+      }
+      setIntervalSeconds(parsedInterval || 60);
     } else {
       setName('');
       setScheduleType('CRON');
       setCronExpression('0 0 12 * * ?');
+      setIntervalSeconds(300);
       const tomorrow = new Date(Date.now() + 86400000);
       const localISO = new Date(tomorrow.getTime() - tomorrow.getTimezoneOffset() * 60000)
         .toISOString()
@@ -107,10 +132,11 @@ export const JobModal: React.FC<JobModalProps> = ({
     }
     setPayloadError(null);
     setMetaError(null);
+    setModalError(null);
   }, [jobToEdit, isOpen]);
 
   useEffect(() => {
-    if (scheduleType === 'CRON' || scheduleType === 'INTERVAL') {
+    if (scheduleType === 'CRON') {
       if (!cronExpression.trim()) {
         setCronHumanized('');
         setCronError('Cron expression cannot be empty');
@@ -174,6 +200,7 @@ export const JobModal: React.FC<JobModalProps> = ({
 
     let finalScheduleTime: string | null = null;
     let finalCron: string | null = null;
+    let finalMeta = meta.trim();
 
     if (scheduleType === 'ONCE') {
       if (!scheduleTime) {
@@ -181,15 +208,27 @@ export const JobModal: React.FC<JobModalProps> = ({
         return;
       }
       finalScheduleTime = new Date(scheduleTime).toISOString();
-    } else {
+    } else if (scheduleType === 'CRON') {
       if (cronError || !cronExpression.trim()) {
         alert('Please fix cron expression.');
         return;
       }
       finalCron = cronExpression.trim();
+    } else if (scheduleType === 'INTERVAL') {
+      finalCron = null;
+      finalScheduleTime = null;
+      const sec = Math.max(1, Number(intervalSeconds) || 60);
+      try {
+        const metaObj = finalMeta ? JSON.parse(finalMeta) : {};
+        metaObj.intervalSeconds = sec;
+        finalMeta = JSON.stringify(metaObj, null, 2);
+      } catch {
+        finalMeta = JSON.stringify({ intervalSeconds: sec }, null, 2);
+      }
     }
 
     setIsSubmitting(true);
+    setModalError(null);
     try {
       if (isEdit && jobToEdit) {
         const updatePayload: UpdateJobPayload = {
@@ -200,7 +239,7 @@ export const JobModal: React.FC<JobModalProps> = ({
           cronExpression: finalCron,
           payload,
           retries,
-          meta: meta.trim() || undefined,
+          meta: finalMeta || undefined,
         };
         await onSave(updatePayload, true, jobToEdit.jobId);
       } else {
@@ -211,13 +250,13 @@ export const JobModal: React.FC<JobModalProps> = ({
           cronExpression: finalCron,
           payload,
           retries,
-          meta: meta.trim() || undefined,
+          meta: finalMeta || undefined,
         };
         await onSave(createPayload, false);
       }
       onClose();
     } catch (err: any) {
-      alert(`Operation failed: ${err.message}`);
+      setModalError(err.message || 'Server rejected the operation');
     } finally {
       setIsSubmitting(false);
     }
@@ -252,6 +291,17 @@ export const JobModal: React.FC<JobModalProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+          {/* Server Error Alert */}
+          {modalError && (
+            <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5 animate-in fade-in duration-150">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold text-rose-200 block">Operation Rejected by Server</span>
+                <span className="text-rose-300 mt-0.5 block font-mono-code leading-relaxed">{modalError}</span>
+              </div>
+            </div>
+          )}
+
           {/* Job Name */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
@@ -299,7 +349,18 @@ export const JobModal: React.FC<JobModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setScheduleType('INTERVAL')}
+                onClick={() => {
+                  setScheduleType('INTERVAL');
+                  try {
+                    const m = meta ? JSON.parse(meta) : {};
+                    if (!m.intervalSeconds && !m.interval) {
+                      m.intervalSeconds = intervalSeconds || 300;
+                      setMeta(JSON.stringify(m, null, 2));
+                    }
+                  } catch {
+                    setMeta(JSON.stringify({ intervalSeconds: intervalSeconds || 300 }, null, 2));
+                  }
+                }}
                 className={`flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-semibold transition-colors ${
                   scheduleType === 'INTERVAL'
                     ? 'bg-hostinger-600 text-white shadow-xs'
@@ -312,8 +373,8 @@ export const JobModal: React.FC<JobModalProps> = ({
             </div>
           </div>
 
-          {/* Schedule Configuration Detail */}
-          {scheduleType === 'CRON' || scheduleType === 'INTERVAL' ? (
+          {/* CRON Schedule Detail */}
+          {scheduleType === 'CRON' && (
             <div className="p-3.5 rounded-lg bg-panel-bg border border-panel-border space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300">
@@ -364,7 +425,10 @@ export const JobModal: React.FC<JobModalProps> = ({
                 </div>
               </div>
             </div>
-          ) : (
+          )}
+
+          {/* ONE-TIME Schedule Detail */}
+          {scheduleType === 'ONCE' && (
             <div className="p-3.5 rounded-lg bg-panel-bg border border-panel-border space-y-1.5">
               <label className="block text-xs font-semibold text-slate-300">
                 Scheduled Execution Date & Time
@@ -379,6 +443,78 @@ export const JobModal: React.FC<JobModalProps> = ({
               <p className="text-[11px] text-slate-500">
                 Converted to ISO-8601 UTC upon scheduling.
               </p>
+            </div>
+          )}
+
+          {/* INTERVAL Schedule Detail (Configured via meta intervalSeconds) */}
+          {scheduleType === 'INTERVAL' && (
+            <div className="p-3.5 rounded-lg bg-panel-bg border border-panel-border space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <span>Interval Duration (Seconds)</span>
+                  <span className="text-hostinger-400 font-mono-code">*</span>
+                </label>
+                <span className="text-[11px] text-slate-500 font-mono-code">
+                  Saved into meta &quot;intervalSeconds&quot;
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={1}
+                  required
+                  value={intervalSeconds}
+                  onChange={(e) => {
+                    const val = Math.max(1, parseInt(e.target.value) || 1);
+                    setIntervalSeconds(val);
+                    try {
+                      const m = meta ? JSON.parse(meta) : {};
+                      m.intervalSeconds = val;
+                      setMeta(JSON.stringify(m, null, 2));
+                    } catch {}
+                  }}
+                  className="w-32 px-3 py-1.5 bg-panel-surface border border-panel-border rounded-lg text-xs font-mono-code text-slate-100 focus:outline-none focus:border-hostinger-600 transition-colors"
+                />
+                <span className="text-xs text-slate-300">
+                  seconds ({intervalSeconds >= 3600 ? `${(intervalSeconds / 3600).toFixed(1)} hrs` : intervalSeconds >= 60 ? `${(intervalSeconds / 60).toFixed(1)} mins` : `${intervalSeconds}s`})
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 text-xs text-hostinger-300 bg-hostinger-600/10 px-3 py-1.5 rounded-md border border-hostinger-600/20">
+                <Clock className="w-3.5 h-3.5 text-hostinger-400 shrink-0" />
+                <span>
+                  Relative recurrence: Runs every <strong className="text-white">{intervalSeconds}s</strong> ({intervalSeconds >= 60 ? `${(intervalSeconds / 60).toFixed(1)}m` : `${intervalSeconds}s`}) from last dispatch.
+                </span>
+              </div>
+
+              {/* Quick Interval Presets */}
+              <div className="pt-1">
+                <span className="text-[11px] text-slate-400 block mb-1">Common Intervals:</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {INTERVAL_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        setIntervalSeconds(preset.seconds);
+                        try {
+                          const m = meta ? JSON.parse(meta) : {};
+                          m.intervalSeconds = preset.seconds;
+                          setMeta(JSON.stringify(m, null, 2));
+                        } catch {}
+                      }}
+                      className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                        intervalSeconds === preset.seconds
+                          ? 'bg-hostinger-600 text-white border-hostinger-600 font-semibold'
+                          : 'bg-panel-subtle hover:bg-panel-border text-slate-300 border-panel-border'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
@@ -494,8 +630,19 @@ export const JobModal: React.FC<JobModalProps> = ({
                 rows={2}
                 value={meta}
                 onChange={(e) => {
-                  setMeta(e.target.value);
+                  const val = e.target.value;
+                  setMeta(val);
                   setMetaError(null);
+                  if (scheduleType === 'INTERVAL') {
+                    try {
+                      const m = JSON.parse(val);
+                      if (m.intervalSeconds) setIntervalSeconds(Number(m.intervalSeconds));
+                      else if (m.interval) setIntervalSeconds(Number(m.interval));
+                    } catch {
+                      const match = val.match(/"intervalSeconds"\s*:\s*(\d+)/) || val.match(/"interval"\s*:\s*(\d+)/);
+                      if (match) setIntervalSeconds(Number(match[1]));
+                    }
+                  }
                 }}
                 className="w-full p-2 bg-panel-bg border border-panel-border rounded-lg text-xs font-mono-code text-slate-300 focus:outline-none focus:border-hostinger-600 transition-colors"
                 placeholder='{"environment": "production"}'

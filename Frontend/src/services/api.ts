@@ -49,6 +49,55 @@ function saveLocalMockRuns(runs: JobRun[]) {
   }
 }
 
+/**
+ * Parses and extracts a human-readable error message from a backend error response.
+ */
+async function extractErrorMessage(res: Response): Promise<string> {
+  try {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const json = await res.json();
+      if (json.message) return json.message;
+      if (json.error) {
+        return typeof json.error === 'string'
+          ? (json.message ? `${json.error}: ${json.message}` : json.error)
+          : JSON.stringify(json.error);
+      }
+      if (json.errors && Array.isArray(json.errors)) {
+        return json.errors
+          .map((e: any) => e.defaultMessage || e.message || JSON.stringify(e))
+          .join(', ');
+      }
+      return JSON.stringify(json);
+    }
+    const text = await res.text();
+    if (text && text.trim().length > 0 && text.length < 500 && !text.includes('<!DOCTYPE')) {
+      return text.trim();
+    }
+  } catch {
+    // fallback
+  }
+  return `Backend returned HTTP ${res.status} (${res.statusText || 'Error'})`;
+}
+
+/**
+ * Determines if the response is from Vite's proxy indicating the gateway on port 8080 is unreachable.
+ */
+async function isGatewayOfflineResponse(res: Response): Promise<boolean> {
+  if (res.status === 503) {
+    try {
+      const cloned = res.clone();
+      const data = await cloned.json();
+      if (data && data.code === 'GATEWAY_DOWN') {
+        return true;
+      }
+    } catch {
+      // not gateway down JSON
+    }
+  }
+  return false;
+}
+
 export const apiService = {
   getForceMock(): boolean {
     return localStorage.getItem(FORCE_MOCK_KEY) === 'true';
@@ -115,7 +164,7 @@ export const apiService = {
 
         const url = `${BASE_URL}/jobs${params.toString() ? `?${params.toString()}` : ''}`;
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2500);
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
         const res = await fetch(url, {
           signal: controller.signal,
           headers: { Accept: 'application/json' },
@@ -126,8 +175,16 @@ export const apiService = {
           const jobs: Job[] = await res.json();
           return { jobs, isMock: false };
         }
-      } catch {
-        // Fall back to mock
+
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('aborted')) {
+          throw err;
+        }
       }
     }
 
@@ -149,8 +206,15 @@ export const apiService = {
         if (res.ok) {
           return await res.json();
         }
-      } catch {
-        // Fall back
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
       }
     }
 
@@ -169,8 +233,15 @@ export const apiService = {
           const runs: JobRun[] = await res.json();
           return { runs, isMock: false };
         }
-      } catch {
-        // Fall back
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
       }
     }
 
@@ -187,8 +258,15 @@ export const apiService = {
         if (res.ok) {
           return await res.json();
         }
-      } catch {
-        // Fall back
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
       }
     }
 
@@ -208,8 +286,15 @@ export const apiService = {
           const runs: JobRun[] = await res.json();
           return { runs, isMock: false };
         }
-      } catch {
-        // Fall back
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
       }
     }
 
@@ -229,6 +314,7 @@ export const apiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
+
         if (res.ok) {
           const text = await res.text();
           let jobId = text.replace(/["\r\n]/g, '').trim();
@@ -240,12 +326,23 @@ export const apiService = {
           }
           return { jobId, isMock: false };
         }
-      } catch {
-        // Fall back
+
+        // Check if gateway on port 8080 is unreachable
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          // Real backend error (400, 404, 409, 500, etc.) - DO NOT swallow!
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        // Rethrow real backend or validation errors
+        if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+          throw err;
+        }
       }
     }
 
-    // Mock store creation
+    // Mock store creation (only used when demo mode or gateway offline)
     const randomSuffix = Math.random().toString(36).substring(2, 10).toUpperCase();
     const newJobId = `01J8${Date.now().toString(36).toUpperCase()}${randomSuffix}`.padEnd(26, '0');
 
@@ -255,7 +352,18 @@ export const apiService = {
     } else if (payload.scheduleType === 'CRON') {
       calculatedNextRun = new Date(Date.now() + 1000 * 60 * 60).toISOString();
     } else {
-      calculatedNextRun = new Date(Date.now() + 1000 * 60 * 10).toISOString();
+      let intervalSec = 60;
+      if (payload.meta) {
+        try {
+          const m = JSON.parse(payload.meta);
+          if (m.intervalSeconds) intervalSec = Number(m.intervalSeconds);
+          else if (m.interval) intervalSec = Number(m.interval);
+        } catch {
+          const match = payload.meta.match(/"intervalSeconds"\s*:\s*(\d+)/) || payload.meta.match(/"interval"\s*:\s*(\d+)/);
+          if (match) intervalSec = Number(match[1]);
+        }
+      }
+      calculatedNextRun = new Date(Date.now() + 1000 * Math.max(1, intervalSec)).toISOString();
     }
 
     const newJob: Job = {
@@ -263,8 +371,8 @@ export const apiService = {
       name: payload.name,
       scheduleType: payload.scheduleType,
       status: 'SCHEDULED',
-      scheduleTime: payload.scheduleTime || null,
-      cronExpression: payload.cronExpression || null,
+      scheduleTime: payload.scheduleType === 'ONCE' ? (payload.scheduleTime || null) : null,
+      cronExpression: payload.scheduleType === 'CRON' ? (payload.cronExpression || null) : null,
       payload: payload.payload,
       retries: payload.retries ?? 3,
       meta: payload.meta,
@@ -287,11 +395,20 @@ export const apiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
+
         if (res.ok) {
           return { success: true, isMock: false };
         }
-      } catch {
-        // Fall back
+
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+          throw err;
+        }
       }
     }
 
@@ -303,8 +420,8 @@ export const apiService = {
           name: payload.name,
           scheduleType: payload.scheduleType,
           status: payload.status,
-          scheduleTime: payload.scheduleTime ?? j.scheduleTime,
-          cronExpression: payload.cronExpression ?? j.cronExpression,
+          scheduleTime: payload.scheduleType === 'ONCE' ? (payload.scheduleTime ?? j.scheduleTime) : null,
+          cronExpression: payload.scheduleType === 'CRON' ? (payload.cronExpression ?? j.cronExpression) : null,
           payload: payload.payload,
           retries: payload.retries ?? j.retries,
           meta: payload.meta ?? j.meta,
@@ -324,11 +441,20 @@ export const apiService = {
         const res = await fetch(`${BASE_URL}/jobs/delete/${encodeURIComponent(jobId)}`, {
           method: 'DELETE',
         });
+
         if (res.ok) {
           return { success: true, isMock: false };
         }
-      } catch {
-        // Fall back
+
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
+          throw err;
+        }
       }
     }
 
@@ -338,6 +464,30 @@ export const apiService = {
   },
 
   async triggerJobRunNow(job: Job): Promise<{ run: JobRun; isMock: boolean }> {
+    const isForced = this.getForceMock();
+    if (!isForced) {
+      try {
+        const res = await fetch(`${BASE_URL}/jobs/${encodeURIComponent(job.jobId)}/run`, {
+          method: 'POST',
+        });
+
+        if (res.ok) {
+          const run: JobRun = await res.json();
+          return { run, isMock: false };
+        }
+
+        const isOffline = await isGatewayOfflineResponse(res);
+        if (!isOffline && res.status !== 404 && res.status !== 501) {
+          const errorMsg = await extractErrorMessage(res);
+          throw new Error(errorMsg);
+        }
+      } catch (err: any) {
+        if (err.message && !err.message.includes('Failed to fetch')) {
+          throw err;
+        }
+      }
+    }
+
     const newRunId = `01J8RUN${Date.now().toString(36).toUpperCase()}`.padEnd(26, '0');
     const newRun: JobRun = {
       id: Math.floor(Math.random() * 1000) + 200,

@@ -83,9 +83,28 @@ export const JobTable: React.FC<JobTableProps> = ({
         secondary: date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
       };
     } else if (job.scheduleType === 'INTERVAL') {
+      let seconds = 60;
+      if (job.meta) {
+        try {
+          const m = JSON.parse(job.meta);
+          if (m.intervalSeconds) seconds = Number(m.intervalSeconds);
+          else if (m.interval) seconds = Number(m.interval);
+        } catch {
+          const match = job.meta.match(/"intervalSeconds"\s*:\s*(\d+)/) || job.meta.match(/"interval"\s*:\s*(\d+)/);
+          if (match) seconds = Number(match[1]);
+        }
+      }
+      const mins = seconds / 60;
+      const hours = seconds / 3600;
+      const humanReadable = hours >= 1 && seconds % 3600 === 0
+        ? `Every ${hours} hour${hours > 1 ? 's' : ''}`
+        : mins >= 1 && seconds % 60 === 0
+        ? `Every ${mins} min${mins > 1 ? 's' : ''}`
+        : `Every ${seconds} second${seconds > 1 ? 's' : ''}`;
+
       return {
-        primary: job.cronExpression || 'Every interval',
-        secondary: 'Recurring Interval',
+        primary: `Every ${seconds}s`,
+        secondary: humanReadable,
       };
     }
     return { primary: 'Not configured', secondary: '--' };

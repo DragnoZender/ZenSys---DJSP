@@ -259,14 +259,30 @@ export const JobDetailDrawer: React.FC<JobDetailDrawerProps> = ({
                   </div>
                 )}
 
-                {job.scheduleType === 'INTERVAL' && (
-                  <div>
-                    <span className="text-xs text-slate-400">Interval Specification:</span>
-                    <p className="text-xs font-mono-code text-slate-200 mt-0.5">
-                      {job.cronExpression || 'Recurring'}
-                    </p>
-                  </div>
-                )}
+                {job.scheduleType === 'INTERVAL' && (() => {
+                  let seconds = 60;
+                  if (job.meta) {
+                    try {
+                      const m = JSON.parse(job.meta);
+                      if (m.intervalSeconds) seconds = Number(m.intervalSeconds);
+                      else if (m.interval) seconds = Number(m.interval);
+                    } catch {
+                      const match = job.meta.match(/"intervalSeconds"\s*:\s*(\d+)/) || job.meta.match(/"interval"\s*:\s*(\d+)/);
+                      if (match) seconds = Number(match[1]);
+                    }
+                  }
+                  return (
+                    <div>
+                      <span className="text-xs text-slate-400">Relative Interval Duration:</span>
+                      <p className="text-xs font-mono-code text-slate-200 mt-0.5">
+                        Every {seconds}s ({seconds >= 3600 ? `${(seconds / 3600).toFixed(1)} hrs` : seconds >= 60 ? `${(seconds / 60).toFixed(1)} mins` : `${seconds}s`})
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Parsed from meta <code className="text-slate-400">&quot;intervalSeconds&quot;: {seconds}</code>. First run: Instant.now() + intervalSeconds.
+                      </p>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Timestamps & Routing */}

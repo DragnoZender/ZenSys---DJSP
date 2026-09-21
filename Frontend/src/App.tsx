@@ -45,9 +45,10 @@ export function App() {
   const addToast = (type: 'success' | 'error' | 'info', title: string, message?: string) => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts((prev) => [...prev, { id, type, title, message }]);
+    const duration = type === 'error' ? 7000 : 4000;
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+    }, duration);
   };
 
   const removeToast = (id: string) => {
@@ -106,22 +107,31 @@ export function App() {
     isEdit: boolean,
     jobId?: string
   ) => {
-    if (isEdit && jobId) {
-      const res = await apiService.updateJob(jobId, payload as UpdateJobPayload);
+    try {
+      if (isEdit && jobId) {
+        const res = await apiService.updateJob(jobId, payload as UpdateJobPayload);
+        addToast(
+          'success',
+          'Job Updated',
+          res.isMock ? `Simulated update for ${payload.name}` : `Updated on Gateway: ${jobId}`
+        );
+      } else {
+        const res = await apiService.createJob(payload as CreateJobPayload);
+        addToast(
+          'success',
+          'Job Scheduled',
+          `Assigned ID: ${res.jobId} ${res.isMock ? '(Demo Mode)' : ''}`
+        );
+      }
+      await loadData(true);
+    } catch (err: any) {
       addToast(
-        'success',
-        'Job Updated',
-        res.isMock ? `Simulated update for ${payload.name}` : `Updated on Gateway: ${jobId}`
+        'error',
+        isEdit ? 'Job Update Failed' : 'Job Creation Failed',
+        err.message || 'Operation was rejected by the server'
       );
-    } else {
-      const res = await apiService.createJob(payload as CreateJobPayload);
-      addToast(
-        'success',
-        'Job Scheduled',
-        `Assigned ID: ${res.jobId} ${res.isMock ? '(Demo Mode)' : ''}`
-      );
+      throw err;
     }
-    await loadData(true);
   };
 
   const handleTogglePause = async (job: Job) => {
@@ -135,7 +145,7 @@ export function App() {
       );
       await loadData(true);
     } catch (err: any) {
-      addToast('error', 'Status Update Failed', err.message);
+      addToast('error', 'Status Update Failed', err.message || 'Backend rejected status change');
     }
   };
 
@@ -151,7 +161,7 @@ export function App() {
       }
       await loadData(true);
     } catch (err: any) {
-      addToast('error', 'Delete Failed', err.message);
+      addToast('error', 'Delete Failed', err.message || 'Server rejected delete operation');
     }
   };
 
@@ -165,7 +175,7 @@ export function App() {
       );
       await loadData(true);
     } catch (err: any) {
-      addToast('error', 'Trigger Failed', err.message);
+      addToast('error', 'Trigger Failed', err.message || 'Server rejected run trigger');
     }
   };
 

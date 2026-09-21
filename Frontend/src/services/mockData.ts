@@ -115,7 +115,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     scheduleType: 'INTERVAL',
     status: 'FAILED_PERMANENTLY',
     scheduleTime: null,
-    cronExpression: '*/10 * * * *',
+    cronExpression: null,
     payload: JSON.stringify({
       crmHost: 'https://crm-legacy.internal.lan',
       authMethod: 'oauth2_refresh',
@@ -123,6 +123,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     }, null, 2),
     retries: 3,
     meta: JSON.stringify({
+      intervalSeconds: 600,
       ticket: 'INFRA-9024',
       status: 'DLQ_DISPATCHED'
     }, null, 2),
