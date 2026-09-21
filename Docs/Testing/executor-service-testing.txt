@@ -1,0 +1,118 @@
+EXECUTOR SERVICE - API TEST EXECUTION REPORT
+============================================
+
+Service: executor-service
+Base URL: http://localhost:8086
+Endpoint: POST /executor/run
+Test status: PASSED
+Execution date: 21 September 2026
+
+OVERVIEW
+--------
+The /executor/run endpoint was tested for valid execution, failure handling,
+timeouts, retry processing, dead-letter routing, plain-text input, empty input,
+generic JSON input, HTTP webhook tasks, and missing request fields. All tested
+scenarios returned the expected result.
+
+API CONTRACT
+------------
+Method: POST
+Path: /executor/run
+Content-Type: application/json
+Expected immediate response: HTTP 202 Accepted
+Response body: Empty
+
+Sample request:
+{
+  "runId": "run-success-001",
+  "jobId": "job-001",
+  "payload": "{\"durationMs\":1000}",
+  "attempt": 1,
+  "maxRetries": 3
+}
+
+TEST RESULTS
+------------
+TC-01: Successful simulated task
+Input: payload = {"durationMs":1000}
+Expected: 202 Accepted; RUNNING and SUCCESS lifecycle events.
+Actual: 202 Accepted; RUNNING and SUCCESS events published to job-run-events.
+Result: PASS
+
+TC-02: Failed simulated task with retry available
+Input: payload = {"durationMs":100,"fail":true,"errorMessage":"Intentional failure"},
+       attempt = 1, maxRetries = 3.
+Expected: 202 Accepted; RUNNING and FAILED events; retry event for attempt 2.
+Actual: Expected lifecycle events were published and a retry event was sent to retry.
+Result: PASS
+
+TC-03: Failed simulated task with retries exhausted
+Input: failing payload, attempt = 3, maxRetries = 3.
+Expected: 202 Accepted; RUNNING and FAILED events; dead-letter event.
+Actual: Expected lifecycle events were published and an event was sent to dead.
+Result: PASS
+
+TC-04: Timed-out task
+Input: payload = {"durationMs":3000,"timeoutSeconds":1}.
+Expected: 202 Accepted; RUNNING and TIMEOUT events; retry/dead-letter handling.
+Actual: Expected timeout lifecycle event and subsequent retry/dead-letter handling occurred.
+Result: PASS
+
+TC-05: Plain-text payload
+Input: payload = "hello world".
+Expected: 202 Accepted; payload handled as a simulated plain-text task; SUCCESS event.
+Actual: 202 Accepted; RUNNING and SUCCESS events published.
+Result: PASS
+
+TC-06: Empty payload
+Input: payload = "".
+Expected: 202 Accepted; no-op task; SUCCESS event.
+Actual: 202 Accepted; RUNNING and SUCCESS events published.
+Result: PASS
+
+TC-07: Generic JSON payload
+Input: payload = {"name":"generic-task"}.
+Expected: 202 Accepted; generic task completes successfully.
+Actual: 202 Accepted; RUNNING and SUCCESS events published.
+Result: PASS
+
+TC-08: HTTP webhook task - successful response
+Input: payload = {"url":"https://httpbin.org/status/200","method":"GET"}.
+Expected: 202 Accepted; successful webhook call; SUCCESS event.
+Actual: 202 Accepted; RUNNING and SUCCESS events published.
+Result: PASS
+
+TC-09: HTTP webhook task - failed response
+Input: payload = {"url":"https://httpbin.org/status/500","method":"GET"}.
+Expected: 202 Accepted; FAILED event; retry or dead-letter event based on attempt count.
+Actual: 202 Accepted; expected failure and retry/dead-letter processing occurred.
+Result: PASS
+
+TC-10: Invalid JSON payload
+Input: payload = "{not-valid-json}".
+Expected: 202 Accepted; treated as plain text; SUCCESS event.
+Actual: 202 Accepted; RUNNING and SUCCESS events published.
+Result: PASS
+
+TC-11: Missing optional/request fields
+Input: {}.
+Expected: Endpoint accepts request because no Bean Validation constraints are configured.
+Actual: 202 Accepted; request accepted as designed.
+Result: PASS
+
+KAFKA TOPIC VALIDATION
+----------------------
+job-run-events: Verified lifecycle event publishing for RUNNING, SUCCESS, FAILED,
+                and TIMEOUT states.
+retry:          Verified retry event publishing when attempt is less than maxRetries.
+dead:           Verified dead-letter event publishing when maxRetries is exhausted.
+
+RETRY RULE VALIDATION
+---------------------
+Retry delay is calculated as: 10 x 2^attempt seconds.
+For attempt 1, the next retry is attempt 2 with a delay of 20 seconds.
+
+FINAL RESULT
+------------
+All API test scenarios completed successfully and produced the expected HTTP,
+asynchronous execution, Kafka lifecycle, retry, and dead-letter outcomes.

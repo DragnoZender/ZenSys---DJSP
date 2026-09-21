@@ -2240,3 +2240,9 @@ What Was Done:
         - GET /jobs/{jobId}/runs: Query execution history for a specific job.
         - GET /jobs/runs/{runId}: Query individual run details (timestamps, duration, executor, failure error messages).
         - GET /jobs/runs?status=...: Query runs across all jobs, with optional status filtering.
+
+
+
+21th sept 2026
+
+Testing of the execuor-service was done
