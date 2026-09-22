@@ -1,0 +1,73 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "WatcherServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.watcher_service.WatcherServiceApplication",
+            "projectName": "watcher-service",
+            "envFile": "${workspaceFolder}/watcher-service/.env"
+        },
+        {
+            "type": "java",
+            "name": "ConsumerServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.consumer_service.ConsumerServiceApplication",
+            "projectName": "consumer-service",
+            "envFile": "${workspaceFolder}/consumer-service/.env"
+        },
+        {
+            "type": "java",
+            "name": "JobSearchServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.job_search_service.JobSearchServiceApplication",
+            "projectName": "job-search-service",
+            "envFile": "${workspaceFolder}/job-search-service/.env"
+        },
+        {
+            "type": "java",
+            "name": "ExecutorServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.executor_service.ExecutorServiceApplication",
+            "projectName": "executor-service",
+            "envFile": "${workspaceFolder}/executor-service/.env"
+        },
+        {
+            "type": "java",
+            "name": "RetryServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.retry_service.RetryServiceApplication",
+            "projectName": "retry-service",
+            "envFile": "${workspaceFolder}/retry-service/.env"
+        },
+        {
+            "type": "java",
+            "name": "JobServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.job_service.JobServiceApplication",
+            "projectName": "job-service"
+        },
+        {
+            "type": "java",
+            "name": "JobConsumerServiceApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.job_consumer_service.JobConsumerServiceApplication",
+            "projectName": "job-consumer-service"
+        },
+        {
+            "type": "java",
+            "name": "ApiGatewayApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.api_gateway.ApiGatewayApplication",
+            "projectName": "api-gateway"
+        },
+        {
+            "type": "java",
+            "name": "ServiceRegistryApplication",
+            "request": "launch",
+            "mainClass": "com.zensys.service_registry.ServiceRegistryApplication",
+            "projectName": "service-registry"
+        }
+    ]
+}

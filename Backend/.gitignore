@@ -1,0 +1,30 @@
+# Environment variables & secrets
+*.env
+.env*
+!.env.example
+
+# Build outputs
+target/
+**/target/
+build/
+**/build/
+
+# IDE & Editor files
+.idea/
+*.iml
+*.ipr
+*.iws
+.settings/
+.project
+.classpath
+.factorypath
+.sts4-cache
+bin/
+**/bin/
+
+# Logs
+*.log
+logs/
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
