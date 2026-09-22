@@ -2246,3 +2246,249 @@ What Was Done:
 21th sept 2026
 
 Testing of the execuor-service was done
+
+22th sept 2026
+
+Identified Race conditon between Wachter-service & Executor-service, when the watcher perform the zombie sweep : 
+
+suppose a executor-service instance recieved a a job_run, executed it and sent the jobRunLifecycle events to the JobRunLifecycle event and shut down once it sent the success event, but when the job_run was in running status, and following event of Success got delayed, during this time, the watcher-service pulled the job_run entry, saw the running status and also saw the executor is not alive and created the retry for it. 
+
+This is a classic distributed systems edge case known as False-Positive Zombie Detection (or premature zombie recovery caused by event consumer lag).
+
+Here is an end-to-end breakdown of how this situation can occur, what happens downstream across ZenSys services, and how the platform behaves.
+
+
+1. Step-by-Step: How the Race Condition Occurs
+
+Imagine an executor with ID executor-8086 processes a job run with runId = run-123:
+
+
+
+   [Executor-8086]                     [Kafka: job-run-events]            [PostgreSQL via Consumer]         [Watcher-Service]
+          |                                       |                                  |                              |
+  1. Starts job --------------------------------->| (RUNNING event)                  |                              |
+          |                                       |--------------------------------->| status = RUNNING             |
+          |                                       |                                  | mod_time = 10:00:00          |
+  2. Finishes execution                           |                                  |                              |
+     Sends SUCCESS event ------------------------>| (SUCCESS event queued)           |                              |
+          |                                       |                                  |                              |
+  3. Executor terminates                          |  [CONSUMER LAG OCCURS]           |                              |
+     (Heartbeat in Redis expires at 10:00:50)     |  (SUCCESS event still in Kafka   |                              |
+          |                                       |   waiting to be consumed)        |                              |
+          |                                       |                                  |                              |
+  4. (Time = 10:00:55)                            |                                  |                              |
+     Watcher runs sweep ------------------------------------------------------------------------------------------->|
+                                                                                     | Reads run-123:               |
+                                                                                     | status = RUNNING             |
+                                                                                     | mod_time is 55s old (>30s)   |
+                                                                                     |                              |
+                                                                                     | Checks Redis heartbeat:      |
+                                                                                     | executor-8086 -> EXPIRED!    |
+                                                                                     |                              |
+                                                                                     | Watcher thinks:              |
+                                                                                     | "EXECUTOR CRASHED MID-JOB!"  |
+                                                                                     |                              |
+                                                                                     | Dispatches:                  |
+                                                                                     | 1. JobRetryEvent -> 'retry'  |
+                                                                                     | 2. EXECUTOR_DIED -> events   |
+
+
+
+
+2. What Happens Downstream in the Services?
+
+A. In consumer-service (Database Record for run-123 is Protected)
+        In the job-run-events Kafka topic, there are now two events for run-123:
+                - JobRunLifecycleEvent(status = SUCCESS) (sent by executor earlier)
+                - JobRunLifecycleEvent(status = EXECUTOR_DIED) (sent by watcher later)
+
+        Because both ExecutorEventProducer and ExecutorRecoveryProducer send lifecycle events keyed by event.getRunId():
+                - Both messages land on the exact same Kafka partition.
+                - Kafka guarantees strict FIFO ordering per partition.
+                - consumer-service will always process SUCCESS first.
+
+        When consumer-service processes them:
+
+                - 1. It processes SUCCESS -> sets job_runs.status = SUCCESS in PostgreSQL.
+
+                - 2. It processes EXECUTOR_DIED next -> hits the Layer 2 Idempotency Guard in JobRunPersistenceService.java:
+                ```
+                if (currentRun.getStatus().isTerminal()) {
+                    log.info("Run runId='{}' is already finished with terminal status '{}'. Ignoring incoming '{}' event.",
+                            currentRun.getRunId(), currentRun.getStatus(), event.getStatus());
+                    return;
+                }
+
+                ```
+                - Result for run-123: The original run record in PostgreSQL remains SUCCESS. It is not overwritten.
+
+B. In retry-service (The Real Problem: Duplicate / Phantom Execution)
+
+        Even though the database record was spared, the watcher also published a JobRetryEvent to the retry topic:
+
+                1. retry-service listens to retry. It checks its local deduplication key: retry:dedup:{jobId}:{attempt} -> this attempt was never retried before, so it accepts it.
+                2. retry-service buffers the retry into the Redis Sorted Set (retry:delayed).
+                3. When the delay expires (e.g., 10 seconds later), RetrySweeperService creates a brand new run (runId = run-456) and sends it to the run topic.
+                4. JobRunConsumer picks it up and dispatches it to an available executor.
+
+        The Consequence: A healthy executor executes the job a second time, even though the first execution already succeeded. If the job payload is non-idempotent (e.g., charging a payment, sending a webhook, deducting inventory), this produces a duplicate side effect.
+
+3. Why Does This Happen Fundamentally?
+
+This happens because of Asymmetric Sources of Truth:
+1. Event Log vs. Materialized DB View: Under Approach B (Single DB Writer via Kafka), PostgreSQL is an asynchronously updated view of the Kafka event log. When the consumer lags, PostgreSQL temporarily falls behind the real-time truth.
+2. Executor Heartbeat vs. Job Heartbeat: The heartbeat in Redis tracks the executor process (executor:{id}:heartbeat), not the individual job run. If an executor legitimately terminates after completing its batch, its missing heartbeat makes all recently executed jobs look abandoned if consumer updates haven't caught up.      
+
+
+This is a classic real-world manifestation of the Two Generals' Problem (and its sister theorem, the FLP Impossibility Theorem).
+
+Mapping ZenSys to the Two Generals' Problem
+
+In the classical thought experiment:
+        - Two allied generals want to attack a fortress simultaneously.
+        - They can only communicate by sending messengers through enemy territory, where messengers can be captured or delayed.
+        - General 1 sends a message: "Attack at dawn!"
+        - But General 1 cannot attack unless he knows General 2 got the message.
+        - General 2 receives the message and sends an acknowledgment: "Agreed! I will attack at dawn."
+        - But General 2 cannot attack unless he knows General 1 received his ACK (otherwise General 2 attacks alone and gets annihilated).
+        - General 1 receives the ACK and sends an ACK-of-the-ACK... ad infinitum.
+
+
+    [Executor] (General 1)                        [Watcher] (General 2)
+        |                                                 |
+        |--- 1. "I completed the job!" (SUCCESS event) -->|
+        |    [Messenger delayed in Kafka queue]           |
+        |                                                 |
+  Executor shuts down                                     |
+  (Goes silent)                                           |
+                                                    Silence in Redis...
+                                                    "Did General 1 die before attacking?
+                                                     Or is the messenger just delayed?"
+                                                          |
+                                                    "I have to assume the worst
+                                                     and send reinforcement troops!" (RETRY)
+
+In our architecture:
+
+1. General 1 (Executor): Runs the job, sends a messenger (the SUCCESS event via Kafka), and terminates.
+2. The Enemy Territory (Network / Queues): Kafka consumer lag, GC pauses, or network delay holds onto the messenger.
+3. General 2 (Watcher): Inspects the state. All the Watcher observes is silence (missing Redis heartbeat and un-updated DB status).
+4. The Impossible Dilemma: The Watcher cannot distinguish between:
+        - Scenario A: The executor crashed mid-flight without doing the work.
+        - Scenario B: The executor completed the work successfully, but the confirmation messenger is still stuck in the queue.
+
+
+The Fundamental Distributed Systems Axiom
+" In an asynchronous distributed system, a dead node is mathematically indistinguishable from a slow node/delayed message. "
+
+This was formally proven by Fischer, Lynch, and Paterson (the FLP Impossibility Theorem, 1985):
+
+        - You cannot build a 100% reliable failure detector over an asynchronous network without false positives.
+        - If you set a timeout ($T = 30\text{s}$), any message delayed by $30.1\text{s}$ will be falsely declared "dead".
+        - If you increase the timeout ($T = 5\text{ minutes}$), you reduce false positives, but when a node actually dies, your system sits frozen for 5 minutes before recovering (sacrificing latency and liveness).
+
+
+Why the Two Generals' Problem Means Infinite ACKs Don't Work
+
+=> Suppose we tried to "fix" this by making the executor wait before shutting down:
+1. Executor finishes and sends SUCCESS.
+2. Executor waits: "I will not shut down until Watcher/Consumer ACKs that the DB is updated."
+3. What if the network drops the ACK from the Consumer?
+        - The Executor hangs forever waiting for the ACK.
+        - Or if the Executor sends a question: "Did you get my SUCCESS?", the Consumer must ACK the inquiry... which is the infinite ACK loop all over again.
+
+
+How Distributed Systems "Solve" the Unsolvable
+Because computer scientists proved you cannot solve the Two Generals' Problem over an unreliable network, distributed systems engineering solves it by changing the rules:
+1. Embrace "At-Least-Once" Delivery:
+        - Accept that because of the Two Generals' Problem, the Watcher will occasionally declare a false alarm and trigger a duplicate retry.
+
+2. Defend with Idempotency:
+        - Instead of trying to achieve impossible perfect coordination, ensure that when the duplicate retry arrives, it causes no harm.
+        - In ZenSys:
+                - consumer-service already protects the database run history via terminal state guards.
+                - The business payload itself (or job-consumer-service) guards against duplicate execution using an idempotency key (e.g., checking if the job or run target is already completed before invoking the task).
+
+
+Here are three statergies that we can use but none of the three strategies alone is a 100% silver bullet, because of the fundamental nature of the Two Generals' Problem.
+However, combining them creates a near-bulletproof production defense.
+
+
+Here is an honest, rigorous look at each strategy — what it solves, and what edge cases still remain.
+
+
+Strategy 1: Increase the Threshold / Lag Buffer (e.g., 60s–90s)
+
+=> How it works: Set Watcher threshold = 90s, while Redis Heartbeat TTL = 30s.
+
+Does it solve the problem?
+        - In 99.9% of normal operations: YES. Under normal load, Kafka consumer lag is measured in milliseconds (typically 5ms–200ms). Giving a 60-second cushion ensures that even with minor GC pauses or network hiccups, the SUCCESS event will easily reach PostgreSQL before the Watcher ever checks that row.
+
+
+What issues still remain?
+        1. Unbounded Delay (The Two Generals trap):
+        - What if consumer-service crashes, experiences a deployment rolling restart, or gets stuck in a 3-minute database connection pool deadlock?
+        - If consumer lag reaches 91 seconds, the false positive will trigger anyway. You cannot fix an unbounded asynchronous network with a static timeout.
+
+        2. Slower Real Failure Recovery (The Latency Penalty):
+        - If an executor genuinely crashes, your platform now takes 90 seconds (instead of 30 seconds) to detect it and trigger a retry.
+
+
+
+Strategy 2: Pre-Execution Guard in job-consumer-service
+
+How it works: When JobRunConsumer pulls a retry message from the run topic, it queries PostgreSQL before dispatching:
+        ```
+        Job job = jobRepository.findById(message.getJobId());
+        if (job.getStatus() == JobStatus.COMPLETED) {
+            log.warn("Job {} is already COMPLETED. Dropping duplicate retry.", job.getId());
+            return; // Discard without executing!
+        }
+
+        ```
+
+Does it solve the problem?
+=> For ScheduleType.ONCE jobs: YES, completely! By the time the retry passes through retry-service's exponential backoff delay (at least 10–20 seconds) and reaches job-consumer-service, consumer-service has long since processed SUCCESS and marked the job COMPLETED. The duplicate is safely dropped before any code runs.
+
+
+What issues still remain?
+        1. Recurring Jobs (CRON and INTERVAL):
+         - For a CRON job, a successful run does not leave the job in COMPLETED. 
+         - JobRunPersistenceService resets the job status back to SCHEDULED for the next tick!
+         - Therefore, checking job.getStatus() == COMPLETED won't stop the duplicate retry of a CRON job.
+         - Fix needed for CRON: You would have to check if a run for that specific schedule window already succeeded: jobRunRepository.existsByJobIdAndScheduledAtAndStatus(jobId, scheduledAt, SUCCESS).
+
+        2. Additional Database Load: Querying PostgreSQL on every single job dispatch adds read queries to your database.
+
+
+
+Strategy 3: Fast-Path Completion Marker in Redis
+        
+        -How it works: When the executor finishes a run, it writes a short-lived key directly into Redis: SET run:{runId}:completed "true" EX 120 (TTL: 2 minutes). Before the Watcher triggers a retry for a missing executor, it checks if run:{runId}:completed exists in Redis.
+        
+Does it solve the problem?
+=> Bypasses Database/Kafka Lag Entirely: YES. Because Redis is in-memory and synchronous (< 1ms), it doesn't matter if Kafka is lagging or PostgreSQL is slow. The Watcher immediately sees that the job actually finished.
+
+What issues still remain?
+        1. The Dual-Write Problem:
+         - The executor now has two things to do upon finishing: write to Kafka AND write to Redis.
+         - What if the executor publishes to Kafka, but its machine loses power or gets SIGKILL before it can write to Redis? The marker is never set, and the false positive happens anyway.
+        2. Redis Memory Overhead:
+        - High-throughput systems running 10,000 jobs/minute will build up millions of temporary keys in Redis.
+
+
+The Industry Standard Solution (Defense-in-Depth)
+        - Because the Two Generals' Problem proves you cannot achieve 100% perfection at the network level, production systems (like Temporal, AWS Step Functions, and Quartz) use a layered combination:
+
+        1. Threshold Buffer (Lag Defense):
+                - Keep Redis Heartbeat TTL = 30s.
+                - Set Watcher Zombie Threshold = 60s (gives a 30s safety net for Kafka lag).
+        2. Backoff + Dispatch Guard in job-consumer-service (Delivery Defense):
+                 -When a retry arrives at job-consumer-service, check if the job is already COMPLETED (for ONCE) or if that specific execution slot already has a SUCCESS record in job_runs.
+                 -If it already succeeded, drop it silently.
+        3. Payload Idempotency (The Ultimate Safety Net):
+                - Accept that on rare occasions, a retry might slip through.
+                - Make the task execution idempotent (e.g., using a unique transaction/order ID so running it twice is a harmless no-op).
+
+
+we are going with strategy 1.

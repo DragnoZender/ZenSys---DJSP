@@ -32,7 +32,7 @@ public class ExecutorLivenessWatcher {
     private final StringRedisTemplate redisTemplate;
     private final ExecutorRecoveryProducer recoveryProducer;
 
-    @Value("${watcher.zombie-sweeper.threshold-seconds:30}")
+    @Value("${watcher.zombie-sweeper.threshold-seconds:60}")
     private long heartbeatTimeoutSeconds;
 
     @Value("${watcher.zombie-sweeper.batch-size:100}")
