@@ -1,0 +1,196 @@
+%% ==============================================================================
+%% ZenSys - Distributed Job Scheduling Platform (DJSP)
+%% Comprehensive System Architecture Diagram
+%% Based STRICTLY on implemented code, configurations, models, and protocols.
+%% ==============================================================================
+
+flowchart TB
+    %% -------------------------------------------------------------------------
+    %% External Clients & Edge Layer
+    %% -------------------------------------------------------------------------
+    subgraph EdgeLayer ["Edge & Ingress Layer"]
+        direction TB
+        Client["Web / API Clients<br/><i>(localhost:5173, localhost:3000)</i>"]
+        Gateway["api-gateway<br/><b>Port: 8080</b><br/><i>Spring Cloud Gateway MVC</i><br/>- Global CORS Enabled<br/>- Actuator: /health, /info, /gateway"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Service Discovery
+    %% -------------------------------------------------------------------------
+    subgraph DiscoveryLayer ["Service Discovery & Registry"]
+        Eureka["service-registry<br/><b>Port: 8761</b><br/><i>Spring Cloud Netflix Eureka Server</i>"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Ingestion & Query (CQRS Pattern)
+    %% -------------------------------------------------------------------------
+    subgraph CQRSLayer ["API Layer (CQRS Separation)"]
+        direction TB
+        subgraph WritePath ["Command / Write Side"]
+            JobService["job-service<br/><b>Port: 8081</b><br/><i>Spring Boot 4.1 / Java 25</i><br/>- POST /jobs/create<br/>- PUT /jobs/update/{id}<br/>- DELETE /jobs/delete/{id}<br/>- Schedule Calculator (CRON / INTERVAL / ONCE)<br/>- ULID Generation (jobId, eventId)"]
+        end
+
+        subgraph ReadPath ["Query / Read Side"]
+            SearchService["job-search-service<br/><b>Port: 8083</b><br/><i>Spring Boot 4.1 / Spring Data JPA</i><br/>- GET /jobs/{jobId}<br/>- GET /jobs?status&scheduleType<br/>- GET /jobs/{jobId}/runs<br/>- GET /jobs/runs/{runId}<br/>- GET /jobs/runs?status"]
+        end
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Message Broker (Apache Kafka)
+    %% -------------------------------------------------------------------------
+    subgraph KafkaBroker ["Apache Kafka Broker (localhost:9092)"]
+        direction TB
+        TopicCommands["Topic: <b>job-commands</b><br/>Key: <code>jobId</code> (FIFO per Job)<br/>Payload: <code>JobCommand</code> (CREATE, UPDATE, DELETE)"]
+        TopicRun["Topic: <b>run</b><br/>Key: <code>jobId</code><br/>Payload: <code>JobRunEvent / JobRunMessage</code> (attempt, payload, maxRetries)"]
+        TopicRunEvents["Topic: <b>job-run-events</b><br/>Key: <code>runId</code> (FIFO per Run)<br/>Payload: <code>JobRunLifecycleEvent</code> (PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, EXECUTOR_DIED)"]
+        TopicRetry["Topic: <b>retry</b><br/>Key: <code>jobId</code><br/>Payload: <code>JobRetryEvent</code> (nextAttempt, retryDelaySeconds, errorMsg)"]
+        TopicDead["Topic: <b>dead</b><br/>Key: <code>jobId</code><br/>Payload: <code>JobDeadEvent</code> (attempt, maxRetries, errorMsg)"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Scheduling & Polling Engine
+    %% -------------------------------------------------------------------------
+    subgraph SchedulingEngine ["Watcher & Fault Recovery Layer"]
+        direction TB
+        WatcherScheduler["watcher-service: WatcherScheduler<br/><b>Port: 8084</b><br/><i>@Scheduled(fixedDelay = 20s)</i><br/>- Polling due jobs batch (batch-size=1000)"]
+        WatcherDBTx["watcher-service: JobTransactionService<br/>- Pessimistic Write Lock (SKIP LOCKED timeout=-2)<br/>- Leases jobs by setting lastPolledTime = now<br/>- Advance Schedule (CRON / INTERVAL / ONCE)"]
+        WatcherRunProducer["watcher-service: RunProducer<br/>- Generates new ULID runId<br/>- Emits initial attempt=1 to Kafka"]
+        ZombieSweeper["watcher-service: ExecutorLivenessWatcher<br/><i>@Scheduled(fixedDelay = 20s)</i><br/>- Queries stale RUNNING runs older than 60s<br/>- Dead Man's Switch verification against Redis<br/>- Acquires distributed lock: lock:recover:{runId}<br/>- Dispatches retry or dead + EXECUTOR_DIED lifecycle"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Execution Layer
+    %% -------------------------------------------------------------------------
+    subgraph ExecutionLayer ["Job Dispatch & Worker Pool"]
+        direction TB
+        JobConsumer["job-consumer-service<br/><b>Port: 8085</b><br/><i>Kafka Consumer: job-dispatch-consumer-group</i><br/>- Consumes 'run' topic<br/>- Emits PENDING lifecycle event to 'job-run-events'<br/>- OpenFeign Client: calls executor-service"]
+        ExecutorService["executor-service<br/><b>Port: 8086</b><br/><i>ExecutorController: POST /executor/run (HTTP 202 Accepted)</i><br/>- Java 25 Virtual Threads Worker Pool<br/>- Emits RUNNING event<br/>- Timeout Guard (CompletableFuture.orTimeout)"]
+        TaskRunner["executor-service: TaskRunner<br/>- HTTP Webhook Task (RestClient POST/GET/etc)<br/>- Simulated Task (durationMs, fail, errorMessage)<br/>- Generic / Text Payload execution"]
+        HeartbeatService["executor-service: ExecutorHeartbeatService<br/><i>@Scheduled(fixedRate = 10s)</i><br/>- Emits Redis heartbeat TTL = 30s<br/>Key: <code>executor:{id}:heartbeat</code>"]
+        ExecutorProducer["executor-service: ExecutorEventProducer<br/>- Publishes SUCCESS / FAILED / TIMEOUT to 'job-run-events'<br/>- If attempt < maxRetries: Publishes 'retry' (10s * 2^attempt)<br/>- If attempt >= maxRetries: Publishes 'dead'"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Retry & Delayed Queue Engine
+    %% -------------------------------------------------------------------------
+    subgraph RetryEngine ["Delay Queue & Retry Engine"]
+        direction TB
+        RetryConsumer["retry-service: RetryEventConsumer<br/><b>Port: 8087</b><br/><i>Kafka Consumer: retry-service-group</i><br/>- Consumes 'retry' topic<br/>- Calculates dueTimestampMs = now + delaySeconds<br/>- Atomic Lua Script: Dedup check + ZADD to Redis ZSET"]
+        RetrySweeper["retry-service: RetrySweeperService<br/><i>@Scheduled(fixedDelay = 1000ms)</i><br/>- Atomic Lua Script: ZRANGEBYSCORE + claim lease (score + 30s)<br/>- Generates new ULID runId for retry attempt<br/>- Publishes JobRunMessage to 'run' topic<br/>- On Kafka Broker ACK: Removes item from Redis ZSET (At-Least-Once)"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% State Management & Persistence Layer
+    %% -------------------------------------------------------------------------
+    subgraph PersistenceLayer ["State Persistence & Idempotency"]
+        direction TB
+        StateConsumer["consumer-service<br/><b>Port: 8082</b><br/><i>Spring Boot 4.1 / Spring Data JPA</i>"]
+        JobPersistence["JobPersistenceService<br/>- Consumer Group: job-consumer-group<br/>- Deduplicates commands via processed_commands table<br/>- Applies CREATE, UPDATE, DELETE to 'jobs' table"]
+        RunPersistence["JobRunPersistenceService<br/>- Consumer Group: job-run-events-consumer-group<br/>- Consumer Group: job-dead-consumer-group<br/>- Layer 1: Deduplicates eventId via processed_events table<br/>- Layer 2: State Machine Guard (rejects out-of-order/terminal regressions)<br/>- Updates 'job_runs' & manages parent 'jobs' lifecycle"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% Persistent Storage & Distributed Cache
+    %% -------------------------------------------------------------------------
+    subgraph DataStorage ["Data Stores & Cloud Infrastructure"]
+        direction TB
+        subgraph PostgresDB ["PostgreSQL Database (Supabase Cloud)"]
+            TableJobs[("Table: <b>jobs</b><br/>- id (ULID PK)<br/>- name, schedule_type, status<br/>- next_run_time, last_polled_time<br/>- cron_expression, payload (jsonb)<br/>- retries (default 3), meta (jsonb)<br/><i>Indices: idx_schedule_time, idx_watcher_poll</i>")]
+            TableJobRuns[("Table: <b>job_runs</b><br/>- id (Bigserial PK), run_id (ULID Unique)<br/>- job_id (FK), status, attempt_number<br/>- start_time, end_time, modification_time<br/>- executor_id, execution_time_ms, error_msg<br/><i>Indices: idx_job_id, idx_status, idx_modification_time</i>")]
+            TableProcessedCmd[("Table: <b>processed_commands</b><br/>- event_id (PK), processed_at")]
+            TableProcessedEvt[("Table: <b>processed_events</b><br/>- event_id (PK), processed_at")]
+        end
+
+        subgraph RedisCache ["Redis In-Memory Store (Upstash Cloud)"]
+            RedisHeartbeat[("Key: <code>executor:{id}:heartbeat</code><br/>Type: String (Timestamp)<br/>TTL: 30 seconds")]
+            RedisRecoveryLock[("Key: <code>lock:recover:{runId}</code><br/>Type: String (Distributed Lock)<br/>TTL: 2 minutes")]
+            RedisDedup[("Key: <code>retry:dedup:{jobId}:{attempt}</code><br/>Type: String (Dedup Flag)<br/>TTL: max(600s, delay + 300s)")]
+            RedisDelayZSet[("Key: <code>retry:delayed</code><br/>Type: Sorted Set (ZSET)<br/>Score: dueTimestampMs<br/>Member: DelayedRetryItem JSON")]
+        end
+    end
+
+    %% =========================================================================
+    %% Network / Service Connections & Data Flows
+    %% =========================================================================
+
+    %% Ingress & Gateway Routing
+    Client -->|"HTTP GET /jobs/**"| Gateway
+    Client -->|"HTTP POST, PUT, DELETE /jobs/**"| Gateway
+    Gateway -.->|"Service Discovery: lb://job-service"| Eureka
+    Gateway -.->|"Service Discovery: lb://job-search-service"| Eureka
+    Gateway -->|"Route: POST, PUT, DELETE /jobs/**"| JobService
+    Gateway -->|"Route: GET /jobs/**"| SearchService
+
+    %% Eureka Registration
+    JobService -.->|"Register & Discover"| Eureka
+    SearchService -.->|"Register & Discover"| Eureka
+    JobConsumer -.->|"Register & Discover"| Eureka
+    ExecutorService -.->|"Register & Discover"| Eureka
+
+    %% Write Pipeline (Job Ingestion)
+    JobService -->|"Kafka Producer: sendJobCommand(command)"| TopicCommands
+    TopicCommands -->|"Kafka Consumer: consume(command)"| JobPersistence
+    JobPersistence -->|"JPA save / update / delete"| TableJobs
+    JobPersistence -->|"Idempotency record"| TableProcessedCmd
+
+    %% Read Pipeline (Job Queries)
+    SearchService -->|"JPA Read-Only Queries (ddl-auto=validate)"| TableJobs
+    SearchService -->|"JPA Read-Only Queries"| TableJobRuns
+
+    %% Scheduling Pipeline (Watcher Poller)
+    WatcherScheduler --> WatcherDBTx
+    WatcherDBTx -->|"Pessimistic Lock: findDueJobs() (FOR UPDATE SKIP LOCKED)"| TableJobs
+    WatcherDBTx -->|"Claim lease: set lastPolledTime = now"| TableJobs
+    WatcherDBTx --> WatcherRunProducer
+    WatcherRunProducer -->|"Kafka Producer: sendRunEvent(runEvent)"| TopicRun
+    WatcherDBTx -->|"Advance nextRunTime (CRON / INTERVAL / ONCE)"| TableJobs
+
+    %% Dispatch & Execution Pipeline
+    TopicRun -->|"Kafka Consumer: consume(message)"| JobConsumer
+    JobConsumer -->|"Kafka Producer: emit PENDING event"| TopicRunEvents
+    JobConsumer -->|"OpenFeign HTTP POST /executor/run"| ExecutorService
+    ExecutorService -->|"Virtual Threads async submit"| TaskRunner
+    HeartbeatService -->|"Atomic SET with TTL 30s"| RedisHeartbeat
+    ExecutorService -->|"Kafka Producer: emit RUNNING event"| TopicRunEvents
+    TaskRunner -->|"Execution Outcome"| ExecutorProducer
+    ExecutorProducer -->|"Emit SUCCESS / FAILED / TIMEOUT"| TopicRunEvents
+    ExecutorProducer -->|"Emit retry if attempt < maxRetries"| TopicRetry
+    ExecutorProducer -->|"Emit dead if attempt >= maxRetries"| TopicDead
+
+    %% Retry Pipeline
+    TopicRetry -->|"Kafka Consumer: consume(event)"| RetryConsumer
+    RetryConsumer -->|"Lua Script: SET retry:dedup NX"| RedisDedup
+    RetryConsumer -->|"Lua Script: ZADD retry:delayed score=dueMs"| RedisDelayZSet
+    RetrySweeper -->|"Lua Script: Lease due items (score + 30s)"| RedisDelayZSet
+    RetrySweeper -->|"Kafka Producer: re-dispatch attempt+1"| TopicRun
+    RetrySweeper -->|"On Kafka ACK: ZREM item"| RedisDelayZSet
+
+    %% Fault-Tolerance / Zombie Sweeper Pipeline
+    ZombieSweeper -->|"Query: findStaleRunningRuns(threshold=60s)"| TableJobRuns
+    ZombieSweeper -->|"Check Dead Man's Switch: hasKey(executor:id:heartbeat)"| RedisHeartbeat
+    ZombieSweeper -->|"Trip Switch: SETNX lock:recover:{runId} (2m)"| RedisRecoveryLock
+    ZombieSweeper -->|"Publish orphaned retry"| TopicRetry
+    ZombieSweeper -->|"Publish orphaned dead"| TopicDead
+    ZombieSweeper -->|"Publish EXECUTOR_DIED event"| TopicRunEvents
+
+    %% State Synchronization & Lifecycle Consumers
+    TopicRunEvents -->|"Kafka Consumer: consumeLifecycleEvent(event)"| RunPersistence
+    TopicDead -->|"Kafka Consumer: consumeDeadEvent(event)"| RunPersistence
+    RunPersistence -->|"Check/Record processed_events"| TableProcessedEvt
+    RunPersistence -->|"State Guard & Record status transition"| TableJobRuns
+    RunPersistence -->|"Sync terminal status (COMPLETED / SCHEDULED / FAILED_PERMANENTLY)"| TableJobs
+
+    %% Styling / Aesthetics
+    classDef edge fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef service fill:#0f172a,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
+    classDef kafka fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+    classDef storage fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#f8fafc;
+    classDef redis fill:#701a75,stroke:#f472b6,stroke-width:2px,color:#f8fafc;
+    classDef registry fill:#7c2d12,stroke:#fb923c,stroke-width:2px,color:#f8fafc;
+
+    class Gateway,Client edge;
+    class Eureka registry;
+    class JobService,SearchService,JobConsumer,ExecutorService,StateConsumer,WatcherScheduler,RetryConsumer,RetrySweeper service;
+    class TopicCommands,TopicRun,TopicRunEvents,TopicRetry,TopicDead kafka;
+    class TableJobs,TableJobRuns,TableProcessedCmd,TableProcessedEvt storage;
+    class RedisHeartbeat,RedisRecoveryLock,RedisDedup,RedisDelayZSet redis;

@@ -2492,3 +2492,15 @@ The Industry Standard Solution (Defense-in-Depth)
 
 
 we are going with strategy 1.
+
+Why 60s is the Sweet Spot (The Math)
+
+Executor Heartbeat TTL in Redis: 30s (refreshed every 10s).
+Watcher Stale Threshold: 60s.
+
+Scenario Walkthrough:
+        1. A job starts at $T = 0$, entering RUNNING with modification_time = 00:00.
+        2. The executor finishes the job at $T = 15\text{s}$, emits SUCCESS to Kafka, and shuts down.
+        3. At $T = 45\text{s}$ (30 seconds after shutdown), the executor's Redis key expires.
+        4. Because the Watcher threshold is 60s, the Watcher ignores this run entirely until $T \ge 60\text{s}$.
+        5. This gives consumer-service a full 45-second grace window ($T=15$ to $T=60$) to consume the SUCCESS event from Kafka and commit it to PostgreSQL. Even under heavy consumer lag or JVM pauses, SUCCESS will commit long before the Watcher ever queries the record.
