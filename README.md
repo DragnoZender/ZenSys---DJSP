@@ -68,93 +68,57 @@ The platform natively supports three job scheduling paradigms:
 
 ```mermaid
 flowchart TB
-    %% Ingress & Discovery
-    subgraph IngressLayer ["Ingress & Discovery Layer"]
-        Client["Web / API Clients<br/><i>(localhost:5173, localhost:3000)</i>"]
-        Gateway["api-gateway<br/><b>Port: 8080</b><br/><i>Spring Cloud Gateway MVC</i>"]
-        Eureka["service-registry<br/><b>Port: 8761</b><br/><i>Eureka Server</i>"]
-    end
 
-    %% CQRS Layer
-    subgraph CQRSLayer ["API Layer (CQRS Separation)"]
-        JobService["job-service<br/><b>Port: 8081</b><br/><i>Write / Ingestion</i>"]
-        SearchService["job-search-service<br/><b>Port: 8083</b><br/><i>Read / Query</i>"]
-    end
+    Client["Client"]
+    Gateway["API Gateway"]
 
-    %% Kafka Broker
-    subgraph KafkaBroker ["Apache Kafka Broker (localhost:9092)"]
-        TopicCommands["Topic: <b>job-commands</b><br/>Key: <code>jobId</code>"]
-        TopicRun["Topic: <b>run</b><br/>Key: <code>jobId</code>"]
-        TopicRunEvents["Topic: <b>job-run-events</b><br/>Key: <code>runId</code>"]
-        TopicRetry["Topic: <b>retry</b><br/>Key: <code>jobId</code>"]
-        TopicDead["Topic: <b>dead</b><br/>Key: <code>jobId</code>"]
-    end
+    JobService["Job Service"]
+    SearchService["Job Search"]
 
-    %% Execution & Worker Layer
-    subgraph ExecutionLayer ["Worker & Dispatch Layer"]
-        JobConsumer["job-consumer-service<br/><b>Port: 8085</b><br/><i>Dispatcher (OpenFeign Client)</i>"]
-        ExecutorService["executor-service<br/><b>Port: 8086</b><br/><i>Virtual Threads Worker Pool</i>"]
-        TaskRunner["TaskRunner<br/><i>Webhooks & Tasks</i>"]
-    end
+    Kafka[["Apache Kafka"]]
 
-    %% Scheduling & Delay Queue
-    subgraph EngineLayer ["Scheduling & Delay Engines"]
-        WatcherService["watcher-service<br/><b>Port: 8084</b><br/><i>SKIP LOCKED Poller & Zombie Sweeper</i>"]
-        RetryService["retry-service<br/><b>Port: 8087</b><br/><i>Redis ZSET Delay Sweeper</i>"]
-    end
+    Consumer["Consumer Service"]
+    Watcher["Watcher Service"]
+    JobConsumer["Job Consumer"]
+    Executor["Executor Service"]
 
-    %% Persistence Layer
-    subgraph PersistenceLayer ["Persistence & State Layer"]
-        ConsumerService["consumer-service<br/><b>Port: 8082</b><br/><i>State Machine & 2-Layer Idempotency</i>"]
-    end
+    PostgreSQL[("PostgreSQL")]
+    Redis[("Redis")]
 
-    %% Data Stores
-    subgraph StorageLayer ["Data Stores"]
-        PostgresDB[("PostgreSQL Database<br/><i>jobs, job_runs, idempotency</i>")]
-        RedisStore[("Redis Cloud Store<br/><i>Heartbeats, ZSET Delay Queue, Locks</i>")]
-    end
+    Client --> Gateway
 
-    %% Data Flow Connections
-    Client -->|"HTTP Requests"| Gateway
-    Gateway -.->|"Discover Routes"| Eureka
-    Gateway -->|"Write: POST, PUT, DELETE"| JobService
-    Gateway -->|"Read: GET /jobs/**"| SearchService
+    Gateway -->|Write| JobService
+    Gateway -->|Read| SearchService
 
-    JobService -->|"Publish JobCommand"| TopicCommands
-    TopicCommands -->|"Consume Commands"| ConsumerService
-    ConsumerService -->|"Save / Update"| PostgresDB
-    SearchService -->|"Read Queries (validate)"| PostgresDB
+    JobService --> Kafka
+    Kafka --> Consumer
 
-    WatcherService -->|"Pessimistic Lock (SKIP LOCKED)"| PostgresDB
-    WatcherService -->|"Publish Due JobRunEvent"| TopicRun
-    WatcherService -->|"Check Heartbeat / Trip Switch"| RedisStore
+    Consumer --> PostgreSQL
+    SearchService --> PostgreSQL
 
-    TopicRun -->|"Consume Run"| JobConsumer
-    JobConsumer -->|"Emit PENDING"| TopicRunEvents
-    JobConsumer -->|"OpenFeign HTTP POST /executor/run"| ExecutorService
+    PostgreSQL --> Watcher
+    Watcher --> Kafka
 
-    ExecutorService -->|"Virtual Threads Task Execution"| TaskRunner
-    ExecutorService -->|"Pulse Heartbeat (TTL 30s)"| RedisStore
-    ExecutorService -->|"Emit RUNNING / SUCCESS / TIMEOUT / FAILED"| TopicRunEvents
-    ExecutorService -->|"Emit Retry (Exponential Backoff)"| TopicRetry
-    ExecutorService -->|"Emit Dead Letter"| TopicDead
+    Kafka --> JobConsumer
+    JobConsumer --> Executor
 
-    TopicRetry -->|"Consume Retry Event"| RetryService
-    RetryService -->|"Atomic Lua: ZADD delayed"| RedisStore
-    RetryService -->|"Atomic Lua: Lease & Re-dispatch"| TopicRun
+    Executor --> Kafka
+    Executor --> Redis
 
-    TopicRunEvents -->|"Sync Lifecycle Status"| ConsumerService
-    TopicDead -->|"Sync Dead Letter Status"| ConsumerService
+    Kafka --> Consumer
+    Watcher --> Redis
 
-    classDef edge fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
-    classDef service fill:#0f172a,stroke:#818cf8,stroke-width:2px,color:#f8fafc;
-    classDef kafka fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
-    classDef storage fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#f8fafc;
+    Kafka --> Retry["Retry"]
+    Retry --> Redis
+    Retry --> Kafka
 
-    class Gateway,Client edge;
-    class Eureka,JobService,SearchService,JobConsumer,ExecutorService,ConsumerService,WatcherService,RetryService service;
-    class TopicCommands,TopicRun,TopicRunEvents,TopicRetry,TopicDead kafka;
-    class PostgresDB,RedisStore storage;
+    classDef service fill:#0f172a,stroke:#818cf8,stroke-width:2px,color:#fff;
+    classDef infra fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#fff;
+    classDef db fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#fff;
+
+    class Client,Gateway,JobService,SearchService,Consumer,Watcher,JobConsumer,Executor,Retry service;
+    class Kafka infra;
+    class PostgreSQL,Redis db;
 ```
 
 ---
