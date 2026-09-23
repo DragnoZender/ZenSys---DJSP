@@ -3,7 +3,7 @@
 [![Java 25](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.org/projects/jdk/25/)
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1.0-brightgreen.svg)](https://spring.io/projects/spring-boot)
 [![Spring Cloud](https://img.shields.io/badge/Spring%20Cloud-2025.1.2-blue.svg)](https://spring.io/projects/spring-cloud)
-[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-localhost%3A9092-black.svg)](https://kafka.apache.org/)
+[![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-black.svg)](https://kafka.apache.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Supabase-blue.svg)](https://supabase.com/)
 [![Redis](https://img.shields.io/badge/Redis-Upstash-red.svg)](https://upstash.com/)
 
