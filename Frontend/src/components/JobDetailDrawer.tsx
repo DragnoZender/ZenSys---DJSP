@@ -14,10 +14,10 @@ import {
   Zap, 
   Code, 
   Tag, 
-  Server,
-  AlertCircle
+  Server
 } from 'lucide-react';
 import cronstrue from 'cronstrue';
+import { RunDetailModal } from './RunDetailModal';
 
 interface JobDetailDrawerProps {
   job: Job | null;
@@ -43,18 +43,39 @@ export const JobDetailDrawer: React.FC<JobDetailDrawerProps> = ({
   const [copiedId, setCopiedId] = useState(false);
   const [runs, setRuns] = useState<JobRun[]>([]);
   const [isLoadingRuns, setIsLoadingRuns] = useState(false);
-  const [selectedRunError, setSelectedRunError] = useState<JobRun | null>(null);
+  const [inspectedRunId, setInspectedRunId] = useState<string | null>(null);
+  const [inspectedRunInitial, setInspectedRunInitial] = useState<JobRun | null>(null);
+  const [inspectedDefaultTab, setInspectedDefaultTab] = useState<'fields' | 'json'>('fields');
 
-  // Fetch runs for the job
+  // Fetch runs for the job only when jobId or drawer open changes
   useEffect(() => {
-    if (job && isOpen) {
+    if (job?.jobId && isOpen) {
       setIsLoadingRuns(true);
       apiService.getJobRuns(job.jobId)
         .then((res) => setRuns(res.runs))
         .catch((err) => console.warn('Could not load runs:', err))
         .finally(() => setIsLoadingRuns(false));
     }
-  }, [job, isOpen]);
+  }, [job?.jobId, isOpen]);
+
+  // Handle Escape key to close drawer when modal is not open
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (!inspectedRunId && isOpen) {
+          onClose();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inspectedRunId, isOpen, onClose]);
+
+  const handleOpenRunDetails = (run: JobRun, defaultTab: 'fields' | 'json' = 'fields') => {
+    setInspectedRunId(run.runId);
+    setInspectedRunInitial(run);
+    setInspectedDefaultTab(defaultTab);
+  };
 
   if (!isOpen || !job) return null;
 
@@ -105,7 +126,8 @@ export const JobDetailDrawer: React.FC<JobDetailDrawerProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden bg-black/60 backdrop-blur-xs flex justify-end animate-in fade-in duration-150">
+    <>
+      <div className="fixed inset-0 z-50 overflow-hidden bg-black/60 backdrop-blur-xs flex justify-end animate-in fade-in duration-150">
       <div className="absolute inset-0" onClick={onClose} />
 
       <div className="relative w-full max-w-2xl bg-panel-surface border-l border-panel-border h-full shadow-2xl flex flex-col z-10 animate-in slide-in-from-right duration-200">
@@ -413,17 +435,27 @@ export const JobDetailDrawer: React.FC<JobDetailDrawerProps> = ({
                           <td className="py-2 px-3 text-right font-sans">
                             {r.errorMsg ? (
                               <button
-                                onClick={() => setSelectedRunError(r)}
-                                className="px-2 py-0.5 rounded text-[10px] font-medium bg-rose-500/10 text-rose-300 border border-rose-500/30 hover:bg-rose-500/20 transition-colors"
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenRunDetails(r, 'fields');
+                                }}
+                                className="px-2.5 py-1 rounded text-[10px] font-semibold bg-rose-500/15 text-rose-300 border border-rose-500/40 hover:bg-rose-500/25 transition-colors cursor-pointer"
+                                title="Inspect Run Error"
                               >
                                 View Error
                               </button>
                             ) : (
                               <button
-                                onClick={() => setSelectedRunError(r)}
-                                className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-400 hover:text-white bg-panel-subtle border border-panel-border transition-colors"
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenRunDetails(r, 'fields');
+                                }}
+                                className="px-2.5 py-1 rounded text-[10px] font-medium text-slate-300 hover:text-white bg-panel-subtle hover:bg-panel-border border border-panel-border transition-colors cursor-pointer"
+                                title="View Run Instance Details"
                               >
-                                View Log
+                                View Details
                               </button>
                             )}
                           </td>
@@ -437,61 +469,20 @@ export const JobDetailDrawer: React.FC<JobDetailDrawerProps> = ({
           )}
         </div>
       </div>
-
-      {/* Stack Trace / Error Modal */}
-      {selectedRunError && (
-        <div className="fixed inset-0 z-60 overflow-y-auto bg-black/80 flex items-center justify-center p-3 animate-in fade-in duration-100">
-          <div className="relative w-full max-w-lg bg-panel-surface border border-panel-border rounded-xl shadow-2xl p-5 text-xs">
-            <div className="flex items-center justify-between pb-3 border-b border-panel-border mb-3">
-              <div className="flex items-center gap-2">
-                <JobRunStatusBadge status={selectedRunError.status} />
-                <span className="font-mono-code font-bold text-white text-xs">
-                  Run Diagnostics
-                </span>
-              </div>
-              <button
-                onClick={() => setSelectedRunError(null)}
-                className="p-1 rounded text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3 font-mono-code text-[11px]">
-              <div className="grid grid-cols-2 gap-2 text-slate-400 bg-panel-bg p-2.5 rounded border border-panel-border">
-                <div>Run ID: <span className="text-slate-200">{selectedRunError.runId}</span></div>
-                <div>Attempt: <span className="text-slate-200">#{selectedRunError.attemptNumber}</span></div>
-                <div>Duration: <span className="text-slate-200">{formatDuration(selectedRunError.executionTimeMs)}</span></div>
-                <div>Executor: <span className="text-slate-200 truncate">{selectedRunError.executorId || '--'}</span></div>
-              </div>
-
-              {selectedRunError.errorMsg ? (
-                <div>
-                  <span className="text-rose-400 font-semibold flex items-center gap-1 mb-1 font-sans">
-                    <AlertCircle className="w-3.5 h-3.5" /> Error Log / Stack Trace:
-                  </span>
-                  <pre className="p-3 rounded bg-panel-bg border border-rose-500/30 text-rose-300 text-[11px] overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-60">
-                    {selectedRunError.errorMsg}
-                  </pre>
-                </div>
-              ) : (
-                <div className="p-3 rounded bg-panel-bg border border-panel-border text-center text-slate-400 font-sans">
-                  No error reported for this run. Exit code was 0.
-                </div>
-              )}
-            </div>
-
-            <div className="pt-3 border-t border-panel-border mt-3 flex justify-end">
-              <button
-                onClick={() => setSelectedRunError(null)}
-                className="px-3 py-1.5 rounded bg-panel-subtle text-slate-200 hover:text-white border border-panel-border font-sans text-xs"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
+
+      {/* Single Run Details Modal (GET /jobs/runs/{runId}) */}
+      <RunDetailModal
+        runId={inspectedRunId}
+        initialRun={inspectedRunInitial}
+        jobName={job.name}
+        isOpen={Boolean(inspectedRunId)}
+        onClose={() => {
+          setInspectedRunId(null);
+          setInspectedRunInitial(null);
+        }}
+        defaultTab={inspectedDefaultTab}
+      />
+    </>
   );
 };

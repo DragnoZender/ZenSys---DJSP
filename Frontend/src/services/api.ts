@@ -2,8 +2,8 @@ import { Job, JobRun, JobStatus, ScheduleType, JobRunStatus, CreateJobPayload, U
 import { INITIAL_MOCK_JOBS, INITIAL_MOCK_RUNS } from './mockData';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-const JOBS_STORAGE_KEY = 'zensys_djsp_mock_jobs_v2';
-const RUNS_STORAGE_KEY = 'zensys_djsp_mock_runs_v2';
+const JOBS_STORAGE_KEY = 'zensys_djsp_mock_jobs_v4';
+const RUNS_STORAGE_KEY = 'zensys_djsp_mock_runs_v4';
 const FORCE_MOCK_KEY = 'zensys_djsp_force_mock';
 
 // Local Mock Stores
@@ -11,7 +11,20 @@ function getLocalMockJobs(): Job[] {
   try {
     const stored = localStorage.getItem(JOBS_STORAGE_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed: Job[] = JSON.parse(stored);
+      // Ensure recurring jobs (CRON or INTERVAL) that executed return to SCHEDULED for their next run, never COMPLETED
+      let hasChange = false;
+      const sanitized = parsed.map((j) => {
+        if ((j.scheduleType === 'CRON' || j.scheduleType === 'INTERVAL') && j.status === 'COMPLETED') {
+          hasChange = true;
+          return { ...j, status: 'SCHEDULED' as JobStatus };
+        }
+        return j;
+      });
+      if (hasChange) {
+        saveLocalMockJobs(sanitized);
+      }
+      return sanitized;
     }
   } catch (e) {
     console.info('Using initial mock jobs:', e);
@@ -32,7 +45,27 @@ function getLocalMockRuns(): JobRun[] {
   try {
     const stored = localStorage.getItem(RUNS_STORAGE_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed: JobRun[] = JSON.parse(stored);
+      // Synchronize latest properties from INITIAL_MOCK_RUNS (e.g. executorId code edits)
+      const initialMap = new Map(INITIAL_MOCK_RUNS.map((r) => [r.runId, r]));
+      let hasUpdates = false;
+      const updatedRuns = parsed.map((run) => {
+        const fresh = initialMap.get(run.runId);
+        if (fresh && fresh.executorId !== run.executorId) {
+          hasUpdates = true;
+          return { ...run, executorId: fresh.executorId };
+        }
+        return run;
+      });
+
+      const existingRunIds = new Set(updatedRuns.map((r) => r.runId));
+      const missingInitial = INITIAL_MOCK_RUNS.filter((r) => !existingRunIds.has(r.runId));
+      if (missingInitial.length > 0 || hasUpdates) {
+        const merged = [...updatedRuns, ...missingInitial];
+        saveLocalMockRuns(merged);
+        return merged;
+      }
+      return updatedRuns;
     }
   } catch (e) {
     console.info('Using initial mock runs:', e);
@@ -100,7 +133,9 @@ async function isGatewayOfflineResponse(res: Response): Promise<boolean> {
 
 export const apiService = {
   getForceMock(): boolean {
-    return localStorage.getItem(FORCE_MOCK_KEY) === 'true';
+    const stored = localStorage.getItem(FORCE_MOCK_KEY);
+    if (stored === 'false') return false;
+    return true; // Default to true (Standalone Mock Mode)
   },
 
   setForceMock(forced: boolean) {
@@ -114,42 +149,10 @@ export const apiService = {
   },
 
   async checkHealth(): Promise<SystemHealth> {
-    const isForcedMock = this.getForceMock();
-    if (isForcedMock) {
-      return {
-        status: 'DOWN',
-        gatewayUrl: BASE_URL || 'http://localhost:8080',
-        isMockMode: true,
-        lastChecked: new Date().toLocaleTimeString(),
-      };
-    }
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch(`${BASE_URL}/actuator/health`, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      });
-      clearTimeout(timeoutId);
-
-      if (res.ok) {
-        const data = await res.json();
-        return {
-          status: data.status === 'UP' ? 'UP' : 'DOWN',
-          gatewayUrl: BASE_URL || 'http://localhost:8080',
-          isMockMode: data.status !== 'UP',
-          lastChecked: new Date().toLocaleTimeString(),
-        };
-      }
-    } catch {
-      // Gateway down
-    }
-
     return {
-      status: 'DOWN',
-      gatewayUrl: BASE_URL || 'http://localhost:8080',
-      isMockMode: true,
+      status: 'UP',
+      gatewayUrl: 'http://localhost:8080',
+      isMockMode: false,
       lastChecked: new Date().toLocaleTimeString(),
     };
   },
@@ -505,6 +508,73 @@ export const apiService = {
 
     const currentRuns = getLocalMockRuns();
     saveLocalMockRuns([newRun, ...currentRuns]);
+
+    // Update job state: CRON and INTERVAL jobs stay SCHEDULED; ONCE goes to RUNNING
+    const currentJobs = getLocalMockJobs();
+    const updatedJobs = currentJobs.map((j) => {
+      if (j.jobId === job.jobId) {
+        return {
+          ...j,
+          lastPolledTime: new Date().toISOString(),
+          lastRunStatus: 'RUNNING' as JobRunStatus,
+          status: (j.status === 'PAUSED' ? 'PAUSED' : (j.scheduleType === 'ONCE' ? 'RUNNING' : 'SCHEDULED')) as JobStatus,
+        };
+      }
+      return j;
+    });
+    saveLocalMockJobs(updatedJobs);
+
+    // Simulate completion: ONCE moves to COMPLETED; CRON and INTERVAL return to SCHEDULED for next run
+    setTimeout(() => {
+      try {
+        const runs = getLocalMockRuns();
+        const duration = Math.floor(Math.random() * 2000) + 800;
+        const finalizedRuns = runs.map((r) => {
+          if (r.runId === newRunId) {
+            return {
+              ...r,
+              status: 'SUCCESS' as JobRunStatus,
+              endTime: new Date().toISOString(),
+              modificationTime: new Date().toISOString(),
+              executionTimeMs: duration,
+            };
+          }
+          return r;
+        });
+        saveLocalMockRuns(finalizedRuns);
+
+        const jobs = getLocalMockJobs();
+        const finalizedJobs = jobs.map((j) => {
+          if (j.jobId === job.jobId) {
+            // For ONCE, job is COMPLETED.
+            // For recurring CRON and INTERVAL jobs, it goes back to SCHEDULED for tomorrow/next interval!
+            const newJobStatus: JobStatus = j.status === 'PAUSED' 
+              ? 'PAUSED' 
+              : (j.scheduleType === 'ONCE' ? 'COMPLETED' : 'SCHEDULED');
+
+            let nextRun = j.nextRunTime;
+            if (j.scheduleType === 'CRON') {
+              nextRun = new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString();
+            } else if (j.scheduleType === 'INTERVAL') {
+              nextRun = new Date(Date.now() + 1000 * 300).toISOString();
+            }
+
+            return {
+              ...j,
+              status: newJobStatus,
+              lastRunStatus: 'SUCCESS' as JobRunStatus,
+              lastPolledTime: new Date().toISOString(),
+              nextRunTime: nextRun,
+            };
+          }
+          return j;
+        });
+        saveLocalMockJobs(finalizedJobs);
+      } catch (err) {
+        console.warn('Could not finalize simulated run:', err);
+      }
+    }, 2500);
+
     return { run: newRun, isMock: true };
   },
 

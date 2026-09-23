@@ -1,0 +1,122 @@
+%% ==============================================================================
+%% ZenSys: Distributed Job Scheduling Platform (DJSP)
+%% High-Impact Architecture Model (LinkedIn & Portfolio Optimized)
+%% Key Highlights: CQRS | Kafka | Java 25 Virtual Threads | Redis Delay Queue | Dead Man's Switch
+%% ==============================================================================
+
+flowchart TB
+    %% -------------------------------------------------------------------------
+    %% TIER 1: CLIENTS & INGRESS
+    %% -------------------------------------------------------------------------
+    subgraph T1 ["🌐 1. INGRESS & SERVICE REGISTRY"]
+        direction LR
+        Client["💻 <b>Clients & Dashboard</b><br/>React / Next.js / Webhooks"]
+        Gateway["🛡️ <b>API Gateway (Port: 8080)</b><br/>Spring Cloud Gateway MVC<br/><i>• CORS & Route Splitting (Read vs Write)</i>"]
+        Eureka["🧭 <b>Service Registry (Port: 8761)</b><br/>Netflix Eureka Server<br/><i>• Dynamic Cluster Discovery</i>"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% TIER 2: CQRS APPLICATION PLANE
+    %% -------------------------------------------------------------------------
+    subgraph T2 ["⚡ 2. CQRS CONTROL PLANE"]
+        direction LR
+        JobService["✍️ <b>job-service (Port: 8081)</b><br/><b>[Command / Write Path]</b><br/>• Monotonic ULID Generator<br/>• Cron / Interval Schedule Parser<br/>• Stateless (Zero DB Bottleneck)"]
+        SearchService["🔍 <b>job-search-service (Port: 8083)</b><br/><b>[Query / Read Path]</b><br/>• Realtime Status & Run History<br/>• Paginated Multi-tenant Search<br/>• Uncontended Read Replica Queries"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% TIER 3: EVENT STREAMING BACKBONE (APACHE KAFKA)
+    %% -------------------------------------------------------------------------
+    subgraph T3 ["📨 3. STREAMING BACKBONE (Apache Kafka)"]
+        direction LR
+        TopicCmd["📥 <b>job-commands</b><br/>Key: <code>jobId</code> (FIFO)"]
+        TopicRun["🚀 <b>run</b><br/>Execution Stream"]
+        TopicEvt["📡 <b>job-run-events</b><br/>Key: <code>runId</code> (Lifecycle)"]
+        TopicRetry["🔁 <b>retry</b><br/>Backoff Delay Buffer"]
+        TopicDead["💀 <b>dead</b><br/>Dead Letter Queue (DLQ)"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% TIER 4: THE 4 CORE DISTRIBUTED ENGINES
+    %% -------------------------------------------------------------------------
+    subgraph T4 ["⚙️ 4. DISTRIBUTED EXECUTION & RESILIENCE ENGINES"]
+        direction LR
+        
+        Watcher["⏰ <b>watcher-service (8084)</b><br/><b>[Autonomous Scheduler]</b><br/>• <b>FOR UPDATE SKIP LOCKED</b> Poller<br/>• Non-blocking 20s Batch Lease<br/>• <b>Dead Man's Switch</b> Sweeper<br/>• Detects Crashed Executors"]
+        
+        Workers["🚀 <b>job-consumer & executor (8085-8086)</b><br/><b>[Worker Fleet]</b><br/>• <b>Java 25 Virtual Threads</b> Pool<br/>• OpenFeign Load-Balanced Dispatch<br/>• Strict Timeout Enforcement<br/>• 10s Redis Heartbeat Pulse"]
+        
+        RetryService["🔄 <b>retry-service (8087)</b><br/><b>[Distributed Delay Queue]</b><br/>• <b>Redis Sorted Set (ZSET)</b> Buffer<br/>• Atomic Lua Ingestion Dedup<br/>• 1s Atomic Lua Lease Sweeper<br/>• At-Least-Once Delivery to 'run'"]
+        
+        ConsumerService["🛡️ <b>consumer-service (8082)</b><br/><b>[State Machine & Persistence]</b><br/>• <b>Layer 1</b>: Event Deduplication<br/>• <b>Layer 2</b>: State Transition Guard<br/>• Prevents Out-of-Order Regression<br/>• Auto-Resets Recurring Jobs"]
+    end
+
+    %% -------------------------------------------------------------------------
+    %% TIER 5: CLOUD STORAGE & COORDINATION INFRASTRUCTURE
+    %% -------------------------------------------------------------------------
+    subgraph T5 ["🗄️ 5. STORAGE & COORDINATION LAYER"]
+        direction LR
+        Postgres[("🐘 <b>PostgreSQL Database (Supabase Cloud)</b><br/>• <code>jobs</code> (Schedules, Next Run, Metadata)<br/>• <code>job_runs</code> (History, Timings, Traces)<br/>• <code>processed_events</code> (Idempotency Ledger)")]
+        Redis[("⚡ <b>Redis Distributed Cache (Upstash Cloud)</b><br/>• <code>executor:id:heartbeat</code> (Dead Man's Switch, TTL 30s)<br/>• <code>retry:delayed</code> (ZSET Scored by Due Epoch)<br/>• <code>lock:recover:*</code> (Distributed Mutex Locks)")]
+    end
+
+    %% =========================================================================
+    %% LINEAR, BALANCED DATA FLOWS (TOP TO BOTTOM)
+    %% =========================================================================
+
+    %% Tier 1 to Tier 2
+    Client -->|"HTTP Requests"| Gateway
+    Gateway <-->|"Discovery"| Eureka
+    Gateway -->|"POST / PUT / DELETE"| JobService
+    Gateway -->|"GET /jobs/**"| SearchService
+
+    %% Tier 2 to Tier 3
+    JobService -->|"1. Publish Command"| TopicCmd
+
+    %% Tier 3 to Tier 4
+    TopicCmd -->|"2. Ingest Command"| ConsumerService
+    TopicRun -->|"4. Dispatch Run"| Workers
+    TopicRetry -->|"8. Ingest Backoff"| RetryService
+    TopicDead -->|"11. Terminal DLQ"| ConsumerService
+
+    %% Tier 4 Internal & Outward Flows
+    Watcher -->|"3. Schedule Due Job"| TopicRun
+    Workers -->|"5. Emit Lifecycle Events"| TopicEvt
+    Workers -.->|"6. Failed Run (attempt < max)"| TopicRetry
+    Workers -.->|"7. Terminal (attempt >= max)"| TopicDead
+    RetryService -.->|"9. Re-dispatch Due Run"| TopicRun
+    Watcher -.->|"10. Orphaned Run Recovery"| TopicRetry
+    TopicEvt -->|"12. Realtime State Stream"| ConsumerService
+
+    %% Tier 4 to Tier 5 (Storage Operations)
+    ConsumerService -->|"State Sync"| Postgres
+    SearchService -.->|"Read Queries"| Postgres
+    Watcher -->|"SKIP LOCKED Lease"| Postgres
+    Watcher <-->|"Heartbeat Check"| Redis
+    Workers -->|"Heartbeat Pulse"| Redis
+    RetryService <-->|"ZADD Delay / Lease"| Redis
+
+    %% =========================================================================
+    %% HIGH-CONTRAST PROFESSIONAL PALETTE
+    %% =========================================================================
+    classDef ingressStyle fill:#0f172a,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef writeStyle fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
+    classDef readStyle fill:#082f49,stroke:#0284c7,stroke-width:2px,color:#f8fafc;
+    classDef kafkaStyle fill:#2e1065,stroke:#c084fc,stroke-width:2px,color:#f8fafc;
+    classDef watcherStyle fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#f8fafc;
+    classDef workerStyle fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#f8fafc;
+    classDef retryStyle fill:#431407,stroke:#fb923c,stroke-width:2px,color:#f8fafc;
+    classDef stateStyle fill:#172554,stroke:#60a5fa,stroke-width:2px,color:#f8fafc;
+    classDef dbStyle fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+    classDef redisStyle fill:#500724,stroke:#f472b6,stroke-width:2px,color:#f8fafc;
+
+    class Client,Gateway,Eureka ingressStyle;
+    class JobService writeStyle;
+    class SearchService readStyle;
+    class TopicCmd,TopicRun,TopicEvt,TopicRetry,TopicDead kafkaStyle;
+    class Watcher watcherStyle;
+    class Workers workerStyle;
+    class RetryService retryStyle;
+    class ConsumerService stateStyle;
+    class Postgres dbStyle;
+    class Redis redisStyle;

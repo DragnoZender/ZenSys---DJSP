@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { JobRun, JobRunStatus } from '../types/job';
 import { JobRunStatusBadge } from './StatusBadge';
-import { Search, Filter, Copy, Check, Terminal, Clock, Server, AlertCircle, X } from 'lucide-react';
+import { Search, Filter, Copy, Check, Terminal, Clock, Server } from 'lucide-react';
+import { RunDetailModal } from './RunDetailModal';
 
 interface GlobalRunsTableProps {
   runs: JobRun[];
@@ -242,97 +243,13 @@ export const GlobalRunsTable: React.FC<GlobalRunsTableProps> = ({
         )}
       </div>
 
-      {/* Run Log & Diagnostics Modal */}
-      {selectedRunForLog && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
-          <div className="relative w-full max-w-2xl bg-panel-surface border border-panel-border rounded-xl shadow-2xl overflow-hidden">
-            {/* Modal Header */}
-            <div className="px-5 py-3.5 border-b border-panel-border flex items-center justify-between bg-panel-bg/60">
-              <div className="flex items-center gap-2.5">
-                <JobRunStatusBadge status={selectedRunForLog.status} />
-                <div>
-                  <h3 className="text-sm font-bold text-white font-mono-code">
-                    Run {selectedRunForLog.runId}
-                  </h3>
-                  <p className="text-[11px] text-slate-400 font-mono-code">
-                    Job ID: {selectedRunForLog.jobId}
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setSelectedRunForLog(null)}
-                className="p-1 rounded text-slate-400 hover:text-white hover:bg-panel-subtle"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Modal Body */}
-            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto text-xs">
-              {/* Metadata Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 rounded-lg bg-panel-bg border border-panel-border font-mono-code">
-                <div>
-                  <span className="text-[10px] uppercase text-slate-500 block">Attempt</span>
-                  <span className="text-slate-200">#{selectedRunForLog.attemptNumber}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] uppercase text-slate-500 block">Duration</span>
-                  <span className="text-slate-200">{formatDuration(selectedRunForLog.executionTimeMs)}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] uppercase text-slate-500 block">Executor</span>
-                  <span className="text-slate-200 truncate block" title={selectedRunForLog.executorId || '--'}>
-                    {selectedRunForLog.executorId || '--'}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[10px] uppercase text-slate-500 block">Modified</span>
-                  <span className="text-slate-200 truncate block">
-                    {new Date(selectedRunForLog.modificationTime).toLocaleTimeString()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Error Stack Trace or Success Output */}
-              {selectedRunForLog.errorMsg ? (
-                <div>
-                  <label className="text-xs font-semibold text-rose-300 flex items-center gap-1.5 mb-1.5">
-                    <AlertCircle className="w-4 h-4 text-rose-400" />
-                    <span>Error Message / Stack Trace</span>
-                  </label>
-                  <pre className="p-3.5 rounded-lg bg-panel-bg border border-rose-500/30 text-rose-200 font-mono-code text-[11px] overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                    {selectedRunForLog.errorMsg}
-                  </pre>
-                </div>
-              ) : (
-                <div className="p-4 rounded-lg bg-panel-bg border border-panel-border text-center text-slate-400">
-                  <Check className="w-5 h-5 text-emerald-400 mx-auto mb-1" />
-                  <p className="text-xs text-slate-300 font-medium">Execution completed with 0 errors</p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">Worker returned exit code 0.</p>
-                </div>
-              )}
-            </div>
-
-            {/* Modal Footer */}
-            <div className="px-5 py-3 border-t border-panel-border bg-panel-bg/40 flex items-center justify-between">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(selectedRunForLog.errorMsg || selectedRunForLog.runId);
-                }}
-                className="text-xs text-slate-400 hover:text-white"
-              >
-                Copy to clipboard
-              </button>
-              <button
-                onClick={() => setSelectedRunForLog(null)}
-                className="px-3.5 py-1.5 rounded-md bg-panel-subtle text-slate-200 hover:text-white border border-panel-border text-xs font-medium"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Run Log & Diagnostics Modal (GET /jobs/runs/{runId}) */}
+      <RunDetailModal
+        runId={selectedRunForLog?.runId || null}
+        initialRun={selectedRunForLog}
+        isOpen={Boolean(selectedRunForLog)}
+        onClose={() => setSelectedRunForLog(null)}
+      />
     </div>
   );
 };

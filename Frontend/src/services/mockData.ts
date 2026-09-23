@@ -72,7 +72,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     jobId: '01J82N4XYZ0000000000000004',
     name: 'Stripe Daily Settlement & Reconciliation',
     scheduleType: 'CRON',
-    status: 'COMPLETED',
+    status: 'SCHEDULED',
     scheduleTime: null,
     cronExpression: '0 30 6 * * ?',
     payload: JSON.stringify({
@@ -85,7 +85,7 @@ export const INITIAL_MOCK_JOBS: Job[] = [
       compliance: 'SOX',
       alertChannel: '#finance-ops'
     }, null, 2),
-    nextRunTime: new Date(Date.now() + 1000 * 60 * 60 * 10).toISOString(),
+    nextRunTime: new Date(Date.now() + 1000 * 60 * 60 * 13).toISOString(),
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
     lastRunStatus: 'SUCCESS',
   },
@@ -149,6 +149,51 @@ export const INITIAL_MOCK_JOBS: Job[] = [
     nextRunTime: null,
     lastPolledTime: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
     lastRunStatus: 'CANCELLED',
+  },
+  {
+    jobId: '01J82N4XYZ0000000000000008',
+    name: 'PostgreSQL Schema Migration (v16.2)',
+    scheduleType: 'ONCE',
+    status: 'COMPLETED',
+    scheduleTime: new Date(Date.now() - 1000 * 60 * 60 * 18).toISOString(),
+    cronExpression: null,
+    payload: JSON.stringify({
+      migrationVersion: '20260921_schema_v16_2',
+      applyDdl: true,
+      affectedTables: ['accounts', 'transactions', 'audit_logs'],
+      safetyChecks: ['foreign_keys', 'indexes', 'zero_downtime']
+    }, null, 2),
+    retries: 1,
+    meta: JSON.stringify({
+      executedBy: 'release-orchestrator',
+      ticket: 'DB-4921',
+      status: 'MIGRATION_VERIFIED'
+    }, null, 2),
+    nextRunTime: null,
+    lastPolledTime: new Date(Date.now() - 1000 * 60 * 60 * 18).toISOString(),
+    lastRunStatus: 'SUCCESS',
+  },
+  {
+    jobId: '01J82N4XYZ0000000000000009',
+    name: 'Kafka Consumer Partition Lag Monitor',
+    scheduleType: 'INTERVAL',
+    status: 'SCHEDULED',
+    scheduleTime: null,
+    cronExpression: null,
+    payload: JSON.stringify({
+      cluster: 'kafka-primary-prod',
+      consumerGroups: ['order-processors', 'billing-workers', 'notification-service'],
+      lagAlertThreshold: 500
+    }, null, 2),
+    retries: 3,
+    meta: JSON.stringify({
+      intervalSeconds: 300,
+      alertChannel: '#kafka-ops',
+      environment: 'production'
+    }, null, 2),
+    nextRunTime: new Date(Date.now() + 1000 * 180).toISOString(),
+    lastPolledTime: new Date(Date.now() - 1000 * 120).toISOString(),
+    lastRunStatus: 'SUCCESS',
   }
 ];
 
@@ -161,20 +206,20 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: '2026-09-20T02:00:00.100Z',
     endTime: '2026-09-20T02:00:04.350Z',
     modificationTime: '2026-09-20T02:00:04.352Z',
-    executorId: 'executor-pod-us-east-4a',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 4250,
     errorMsg: null
   },
   {
-    id: 103,
+    id: 89,
     runId: '01J82NRUN00000000000000002',
     jobId: '01J82N4XYZ0000000000000001',
     status: 'FAILED',
     startTime: '2026-09-19T02:00:00.080Z',
     endTime: '2026-09-19T02:00:01.200Z',
     modificationTime: '2026-09-19T02:00:01.202Z',
-    executorId: 'executor-pod-us-east-2b',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 1120,
     errorMsg: 'S3BucketNotFoundException: Bucket \'backups\' was not reachable\n  at com.zensys.storage.S3Client.connect(S3Client.java:142)\n  at com.zensys.worker.BackupTask.execute(BackupTask.java:55)'
@@ -187,7 +232,7 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
     endTime: null,
     modificationTime: new Date().toISOString(),
-    executorId: 'executor-pod-worker-08',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 1800000,
     errorMsg: null
@@ -200,7 +245,7 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 38).toISOString(),
     endTime: new Date(Date.now() - 1000 * 60 * 37).toISOString(),
     modificationTime: new Date(Date.now() - 1000 * 60 * 37).toISOString(),
-    executorId: 'executor-pod-us-west-1',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 380,
     errorMsg: null
@@ -213,7 +258,7 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
     endTime: new Date(Date.now() - 1000 * 60 * 88).toISOString(),
     modificationTime: new Date(Date.now() - 1000 * 60 * 88).toISOString(),
-    executorId: 'executor-fin-secure-02',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 12400,
     errorMsg: null
@@ -226,7 +271,7 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
     endTime: new Date(Date.now() - 1000 * 60 * 11).toISOString(),
     modificationTime: new Date(Date.now() - 1000 * 60 * 11).toISOString(),
-    executorId: 'executor-crm-legacy-01',
+    executorId: 'executor:8086',
     attemptNumber: 3,
     executionTimeMs: 2450,
     errorMsg: 'SocketTimeoutException: Read timed out after 2000ms connecting to https://crm-legacy.internal.lan\n  at java.net.SocketInputStream.socketRead0(Native Method)\n  at com.zensys.worker.CrmWorker.syncBatch(CrmWorker.java:189)'
@@ -239,7 +284,7 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 22).toISOString(),
     endTime: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
     modificationTime: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
-    executorId: 'executor-crm-legacy-01',
+    executorId: 'executor:8086',
     attemptNumber: 2,
     executionTimeMs: 120000,
     errorMsg: 'JobExecutionTimeoutException: Run duration exceeded configured threshold of 120000ms'
@@ -252,9 +297,87 @@ export const INITIAL_MOCK_RUNS: JobRun[] = [
     startTime: new Date(Date.now() - 1000 * 60 * 32).toISOString(),
     endTime: new Date(Date.now() - 1000 * 60 * 31).toISOString(),
     modificationTime: new Date(Date.now() - 1000 * 60 * 31).toISOString(),
-    executorId: 'executor-crm-legacy-03',
+    executorId: 'executor:8086',
     attemptNumber: 1,
     executionTimeMs: 15400,
     errorMsg: 'HeartbeatLostException: Worker pod terminated unexpectedly (OOMKilled exit code 137)'
+  },
+  {
+    id: 96,
+    runId: '01J82NRUN00000000000000009',
+    jobId: '01J82N4XYZ0000000000000008',
+    status: 'SUCCESS',
+    startTime: new Date(Date.now() - 1000 * 60 * 60 * 18).toISOString(),
+    endTime: new Date(Date.now() - 1000 * (60 * 60 * 18 - 32)).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * (60 * 60 * 18 - 32)).toISOString(),
+    executorId: 'executor:8086',
+    attemptNumber: 1,
+    executionTimeMs: 32500,
+    errorMsg: null
+  },
+  {
+    id: 95,
+    runId: '01J82NRUN00000000000000010',
+    jobId: '01J82N4XYZ0000000000000009',
+    status: 'SUCCESS',
+    startTime: new Date(Date.now() - 1000 * 120).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 119).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 119).toISOString(),
+    executorId: 'executor:8086',
+    attemptNumber: 1,
+    executionTimeMs: 310,
+    errorMsg: null
+  },
+  {
+    id: 105,
+    runId: '01J82NRUN00000000000000011',
+    jobId: '01J82N4XYZ0000000000000004',
+    status: 'QUEUED',
+    startTime: null,
+    endTime: null,
+    modificationTime: new Date(Date.now() - 1000 * 35).toISOString(),
+    executorId: null,
+    attemptNumber: 1,
+    executionTimeMs: null,
+    errorMsg: null
+  },
+  {
+    id: 106,
+    runId: '01J82NRUN00000000000000012',
+    jobId: '01J82N4XYZ0000000000000007',
+    status: 'CANCELLED',
+    startTime: new Date(Date.now() - 1000 * 60 * 125).toISOString(),
+    endTime: new Date(Date.now() - 1000 * 60 * 124).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * 60 * 124).toISOString(),
+    executorId: 'executor:8086',
+    attemptNumber: 1,
+    executionTimeMs: 4800,
+    errorMsg: 'TaskCancelledException: Run aborted by operator before database lease acquisition'
+  },
+  {
+    id: 107,
+    runId: '01J82NRUN00000000000000013',
+    jobId: '01J82N4XYZ0000000000000002',
+    status: 'PENDING',
+    startTime: null,
+    endTime: null,
+    modificationTime: new Date(Date.now() - 1000 * 15).toISOString(),
+    executorId: null,
+    attemptNumber: 1,
+    executionTimeMs: null,
+    errorMsg: null
+  },
+  {
+    id: 108,
+    runId: '01J82NRUN00000000000000014',
+    jobId: '01J82N4XYZ0000000000000005',
+    status: 'SUCCESS',
+    startTime: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7).toISOString(),
+    endTime: new Date(Date.now() - 1000 * (60 * 60 * 24 * 7 - 58)).toISOString(),
+    modificationTime: new Date(Date.now() - 1000 * (60 * 60 * 24 * 7 - 58)).toISOString(),
+    executorId: 'executor:8086',
+    attemptNumber: 1,
+    executionTimeMs: 58240,
+    errorMsg: null
   }
 ];

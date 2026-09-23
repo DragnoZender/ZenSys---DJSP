@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, RefreshCw, Server, Database, Layers, Activity } from 'lucide-react';
+import { Plus, RefreshCw, Server, Layers, Activity } from 'lucide-react';
 import { SystemHealth } from '../types/job';
 
 interface HeaderProps {
@@ -11,21 +11,19 @@ interface HeaderProps {
   onToggleAutoRefresh: () => void;
   onManualRefresh: () => void;
   onOpenCreateModal: () => void;
-  onToggleForceMock: () => void;
+  onToggleForceMock?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   activeTab,
   onTabChange,
-  health,
+  health: _health,
   isRefreshing,
   autoRefresh,
   onToggleAutoRefresh,
   onManualRefresh,
   onOpenCreateModal,
-  onToggleForceMock,
 }) => {
-  const isOnline = health.status === 'UP' && !health.isMockMode;
 
   return (
     <header className="sticky top-0 z-30 border-b border-panel-border bg-panel-bg/95 backdrop-blur-sm">
@@ -33,45 +31,36 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Logo & Navigation Tabs */}
         <div className="flex items-center gap-8">
           {/* Brand */}
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-hostinger-600 flex items-center justify-center font-bold text-white shadow-sm">
-              <span className="text-base tracking-tighter">Z</span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-base tracking-tight text-white">
+                ZenSys
+              </span>
+
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-base tracking-tight text-white">
-                  ZenSys
-                </span>
-                <span className="px-1.5 py-0.2 text-[10px] font-semibold tracking-wider rounded bg-panel-subtle text-slate-300 border border-panel-border">
-                  DJSP
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 font-normal hidden sm:block">
-                Distributed Job Scheduling Platform
-              </p>
-            </div>
+            <p className="text-[11px] text-slate-400 font-normal hidden sm:block">
+              Job Scheduling Platform
+            </p>
           </div>
 
           {/* Navigation Tabs (Hostinger Style) */}
           <nav className="hidden md:flex items-center gap-1 bg-panel-surface p-1 rounded-lg border border-panel-border">
             <button
               onClick={() => onTabChange('jobs')}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                activeTab === 'jobs'
-                  ? 'bg-panel-subtle text-white border border-panel-border shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${activeTab === 'jobs'
+                ? 'bg-panel-subtle text-white border border-panel-border shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+                }`}
             >
               <Layers className="w-3.5 h-3.5" />
               <span>Jobs</span>
             </button>
             <button
               onClick={() => onTabChange('runs')}
-              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                activeTab === 'runs'
-                  ? 'bg-panel-subtle text-white border border-panel-border shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors ${activeTab === 'runs'
+                ? 'bg-panel-subtle text-white border border-panel-border shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+                }`}
             >
               <Activity className="w-3.5 h-3.5" />
               <span>Global Runs</span>
@@ -98,36 +87,25 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Gateway Status Badge */}
-          <button
-            onClick={onToggleForceMock}
-            title="Click to toggle between Live Gateway (Port 8080) and Demo Mode"
-            className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-              isOnline
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
-                : 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'
-            }`}
+          <div
+            className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-xs"
+            title="Gateway Connected (Port 8080) — System Operational"
           >
-            {isOnline ? (
-              <>
-                <Server className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Gateway 8080: UP</span>
-              </>
-            ) : (
-              <>
-                <Database className="w-3.5 h-3.5 text-amber-400" />
-                <span>Demo Mode</span>
-              </>
-            )}
-          </button>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <Server className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Gateway 8080: UP</span>
+          </div>
 
           {/* Auto-Refresh Toggle */}
           <button
             onClick={onToggleAutoRefresh}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-              autoRefresh
-                ? 'bg-panel-subtle text-white border-panel-border'
-                : 'bg-panel-surface text-slate-400 border-panel-border hover:text-slate-200'
-            }`}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${autoRefresh
+              ? 'bg-panel-subtle text-white border-panel-border'
+              : 'bg-panel-surface text-slate-400 border-panel-border hover:text-slate-200'
+              }`}
             title="Auto polls status every 10 seconds"
           >
             <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh ? 'bg-emerald-400' : 'bg-slate-500'}`} />

@@ -8,7 +8,7 @@ import { GlobalRunsTable } from './components/GlobalRunsTable';
 import { JobModal } from './components/JobModal';
 import { JobDetailDrawer } from './components/JobDetailDrawer';
 import { ToastContainer, ToastMessage } from './components/Toast';
-import { Info, RefreshCw, Layers, Activity } from 'lucide-react';
+import { RefreshCw, Layers, Activity } from 'lucide-react';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<'jobs' | 'runs'>('jobs');
@@ -65,27 +65,39 @@ export function App() {
         apiService.getAllRuns(runsStatusFilter),
       ]);
 
-      const isMockActive = jobsData.isMock || healthData.isMockMode;
       setHealth({
         ...healthData,
-        status: isMockActive ? 'DOWN' : 'UP',
-        isMockMode: isMockActive,
+        status: 'UP',
+        isMockMode: false,
       });
 
       setJobs(jobsData.jobs);
       setRuns(runsData.runs);
 
-      if (viewingJob) {
-        const updatedViewing = jobsData.jobs.find((j) => j.jobId === viewingJob.jobId);
-        if (updatedViewing) setViewingJob(updatedViewing);
-      }
+      setViewingJob((prev) => {
+        if (!prev) return null;
+        const updated = jobsData.jobs.find((j) => j.jobId === prev.jobId);
+        if (!updated) return prev;
+        if (
+          prev.status === updated.status &&
+          prev.name === updated.name &&
+          prev.nextRunTime === updated.nextRunTime &&
+          prev.lastPolledTime === updated.lastPolledTime &&
+          prev.lastRunStatus === updated.lastRunStatus &&
+          prev.payload === updated.payload &&
+          prev.meta === updated.meta
+        ) {
+          return prev;
+        }
+        return updated;
+      });
     } catch (err: any) {
       addToast('error', 'Sync Failed', err.message || 'Could not reach backend');
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [viewingJob, statusFilter, typeFilter, runsStatusFilter]);
+  }, [statusFilter, typeFilter, runsStatusFilter]);
 
   // Initial fetch
   useEffect(() => {
@@ -109,18 +121,18 @@ export function App() {
   ) => {
     try {
       if (isEdit && jobId) {
-        const res = await apiService.updateJob(jobId, payload as UpdateJobPayload);
+        await apiService.updateJob(jobId, payload as UpdateJobPayload);
         addToast(
           'success',
           'Job Updated',
-          res.isMock ? `Simulated update for ${payload.name}` : `Updated on Gateway: ${jobId}`
+          `Successfully updated ${payload.name}`
         );
       } else {
         const res = await apiService.createJob(payload as CreateJobPayload);
         addToast(
           'success',
           'Job Scheduled',
-          `Assigned ID: ${res.jobId} ${res.isMock ? '(Demo Mode)' : ''}`
+          `Assigned ID: ${res.jobId}`
         );
       }
       await loadData(true);
@@ -180,21 +192,9 @@ export function App() {
   };
 
   const handleToggleForceMock = () => {
-    const current = apiService.getForceMock();
-    apiService.setForceMock(!current);
-    addToast(
-      'info',
-      !current ? 'Switched to Demo Mode' : 'Switched to Live Gateway Mode',
-      !current ? 'All changes will persist locally' : 'Attempting to query http://localhost:8080'
-    );
     loadData();
   };
 
-  const handleResetMockJobs = () => {
-    apiService.resetMockData();
-    addToast('info', 'Demo Data Reset', 'Restored default sample jobs and runs');
-    loadData();
-  };
 
   const handleJumpToJobFromRun = (jobId: string) => {
     const found = jobs.find((j) => j.jobId === jobId);
@@ -238,55 +238,19 @@ export function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        
-        {/* Gateway Offline Banner (Hostinger Clean Style) */}
-        {health.isMockMode && (
-          <div className="mb-6 p-3.5 rounded-xl border border-panel-border bg-panel-surface flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-panel-subtle text-amber-400 border border-panel-border">
-                <Info className="w-4 h-4" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-xs font-bold text-white">
-                    Demo Mode Active
-                  </h3>
-                  <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                    Offline Resilient
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Gateway at <code className="text-slate-300 font-mono-code">{health.gatewayUrl}</code> is offline. Operations persist in browser storage.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 self-end sm:self-center">
-              <button
-                onClick={handleResetMockJobs}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-panel-subtle hover:bg-panel-border text-slate-300 border border-panel-border transition-colors"
-              >
-                Reset Demo Data
-              </button>
-              <button
-                onClick={() => loadData()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-hostinger-600 hover:bg-hostinger-700 text-white transition-colors"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Retry Gateway</span>
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Top Metric Cards */}
         <MetricCards
+          activeTab={activeTab}
           jobs={jobs}
           runs={runs}
-          activeStatusFilter={statusFilter}
-          onSelectFilter={(status) => {
-            setActiveTab('jobs');
+          activeJobStatusFilter={statusFilter}
+          onSelectJobFilter={(status) => {
             setStatusFilter(status);
+          }}
+          activeRunStatusFilter={runsStatusFilter}
+          onSelectRunFilter={(status) => {
+            setRunsStatusFilter(status);
           }}
         />
 
@@ -390,7 +354,7 @@ export function App() {
       {/* Clean Footer */}
       <footer className="mt-auto border-t border-panel-border py-4 bg-panel-bg text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>ZenSys DJSP &bull; Enterprise Operations Dashboard</span>
+          <span>ZenSys &bull; Enterprise Operations Dashboard</span>
           <div className="flex items-center gap-4 text-[11px]">
             <span>Gateway: <code className="text-slate-400">{health.gatewayUrl}</code></span>
             <span>Last Polled: {health.lastChecked || 'Just now'}</span>
