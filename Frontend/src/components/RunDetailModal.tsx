@@ -119,9 +119,6 @@ export const RunDetailModal: React.FC<RunDetailModalProps> = ({
                 <h3 className="text-sm font-bold text-white font-mono-code">
                   Run Instance Details
                 </h3>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-code bg-panel-subtle text-slate-400 border border-panel-border">
-                  GET /jobs/runs/{run?.runId ? `${run.runId.substring(0, 10)}...` : '{runId}'}
-                </span>
               </div>
               {jobName && (
                 <p className="text-[11px] text-slate-400 mt-0.5">
@@ -146,11 +143,10 @@ export const RunDetailModal: React.FC<RunDetailModalProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('fields')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'fields'
-                  ? 'border-hostinger-500 text-white bg-panel-subtle/60'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors cursor-pointer ${activeTab === 'fields'
+                ? 'border-hostinger-500 text-white bg-panel-subtle/60'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
             >
               <FileText className="w-3.5 h-3.5 text-hostinger-400" />
               <span>Response Fields</span>
@@ -158,11 +154,10 @@ export const RunDetailModal: React.FC<RunDetailModalProps> = ({
             <button
               type="button"
               onClick={() => setActiveTab('json')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors cursor-pointer ${
-                activeTab === 'json'
-                  ? 'border-hostinger-500 text-white bg-panel-subtle/60'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors cursor-pointer ${activeTab === 'json'
+                ? 'border-hostinger-500 text-white bg-panel-subtle/60'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
             >
               <Code className="w-3.5 h-3.5 text-hostinger-400" />
               <span>Raw JSON (`200 OK`)</span>
