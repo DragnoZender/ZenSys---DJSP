@@ -115,10 +115,12 @@ flowchart TB
     classDef service fill:#0f172a,stroke:#818cf8,stroke-width:2px,color:#fff;
     classDef infra fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#fff;
     classDef db fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#fff;
-
+    classDef redis fill:#7f1d1d,stroke:#ef4444,stroke-width:2px,color:#fff;
+    
     class Client,Gateway,JobService,SearchService,Consumer,Watcher,JobConsumer,Executor,Retry service;
     class Kafka infra;
-    class PostgreSQL,Redis db;
+    class PostgreSQL db;
+    class Redis redis;
 ```
 
 ---
